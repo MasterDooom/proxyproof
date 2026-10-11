@@ -35,6 +35,17 @@ This is a prototype, not production-grade proof of physical presence. BLE RSSI i
 6. Display a clear state: scanning, candidate detected, validating, present, ambiguous room, or session closed.
 7. View attendance history and percentage.
 
+
+## 3A. Attendance cutoff and late arrivals
+
+- Each class/session has a scheduled class start time, separate from when the organiser opens the session.
+- Automatic attendance is allowed only from the scheduled start time through the 15-minute grace window.
+- The backend computes and enforces `attendance_deadline = scheduled_start_at + 15 minutes`; client clocks and delayed requests cannot extend it.
+- Example: an 08:00 class accepts automatic attendance until 08:15. After 08:15, reject all new automatic BLE attendance submissions even if the session's BLE signal remains visible.
+- The organiser may still view the roster and make a clearly logged manual correction after the deadline.
+- The class itself continues after the attendance window closes. BLE advertising/scanning for attendance should stop at the deadline.
+- If an organiser starts the attendance session late, do not reset the deadline to 15 minutes after opening. Use the scheduled class start time. If the scheduled start time is missing, require the organiser to enter/confirm it before starting.
+
 ## 4. Room matching and neighbouring-room behaviour
 
 - Every room has a stable server-side room ID. Room names are display labels, never the security key.
