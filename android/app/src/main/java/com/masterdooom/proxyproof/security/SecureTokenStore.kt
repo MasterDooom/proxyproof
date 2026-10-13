@@ -8,9 +8,9 @@ import java.security.GeneralSecurityException
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
+import android.security.keystore.KeyGenParameterSpec
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.KeyGenParameterSpec
 import javax.crypto.KeyProperties
 
 /**
@@ -37,8 +37,10 @@ class SecureTokenStore(context: Context) {
             if (ivLength !in 12..16 || buffer.remaining() <= ivLength) {
                 throw GeneralSecurityException("Invalid token envelope.")
             }
-            val iv = ByteArray(ivLength).also(buffer::get)
-            val ciphertext = ByteArray(buffer.remaining()).also(buffer::get)
+            val iv = ByteArray(ivLength)
+            buffer.get(iv)
+            val ciphertext = ByteArray(buffer.remaining())
+            buffer.get(ciphertext)
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
             String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8)
