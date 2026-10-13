@@ -8,6 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.main import app
+from app.models import AttendanceSession
 
 test_engine = create_engine(
     "sqlite://",
@@ -382,3 +383,31 @@ def test_closed_session_rejects_ble_attendance(client: TestClient):
         json={"session_tag": ad["session_tag"], "token": ad["token"], "rssi": -55},
     )
     assert attendance.status_code == 409
+
+
+def test_submission_is_rejected_after_the_15_minute_deadline(client: TestClient):
+    student = register_user(client, "alice")
+    organiser = register_user(client, "teacher", role="organiser")
+    room_id = create_room(client, organiser)
+    enroll(client, student, room_id)
+    register_device(client, student)
+    session = create_session(client, organiser, room_id).json()
+    ad = get_ble_advertisement(client, organiser, session["id"])
+
+    # Simulate the clock passing the cutoff without waiting 15 minutes in a test.
+    db = TestSessionLocal()
+    try:
+        row = db.get(AttendanceSession, session["id"])
+        row.attendance_deadline = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.post(
+        "/attendance/ble",
+        headers=student["headers"],
+        json={"session_tag": ad["session_tag"], "token": ad["token"], "rssi": -55},
+    )
+    assert response.status_code == 422
+    assert "window" in response.json()["detail"].lower()
+
