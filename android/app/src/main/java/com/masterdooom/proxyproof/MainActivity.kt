@@ -64,6 +64,7 @@ import com.masterdooom.proxyproof.ble.BleAdvertiser
 import com.masterdooom.proxyproof.ble.BleObservation
 import com.masterdooom.proxyproof.ble.BleProtocol
 import com.masterdooom.proxyproof.ble.BleScanner
+import com.masterdooom.proxyproof.security.SecureTokenStore
 import com.masterdooom.proxyproof.ui.theme.ProxyProofTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
@@ -149,11 +150,21 @@ class MainActivity : ComponentActivity() {
 private fun ProxyProofRoot() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
+    val secureTokenStore = remember(context) { SecureTokenStore(context) }
+    val legacyToken = remember { prefs.getString("access_token", null) }
     val defaultApiUrl = remember { context.getString(R.string.default_api_url) }
     var apiBase by remember {
         mutableStateOf(prefs.getString("api_base", defaultApiUrl) ?: defaultApiUrl)
     }
-    var token by remember { mutableStateOf(prefs.getString("access_token", "") ?: "") }
+    var token by remember { mutableStateOf(secureTokenStore.read() ?: legacyToken.orEmpty()) }
+    LaunchedEffect(secureTokenStore) {
+        // Migrate an older plaintext token once, then remove the old preference.
+        if (secureTokenStore.read().isNullOrBlank() && !legacyToken.isNullOrBlank()) {
+            val migrated = runCatching { secureTokenStore.write(legacyToken) }.isSuccess
+            prefs.edit().remove("access_token").apply()
+            if (!migrated) token = ""
+        }
+    }
     var username by remember { mutableStateOf(prefs.getString("username", "") ?: "") }
     var displayName by remember { mutableStateOf(prefs.getString("display_name", "") ?: "") }
     var role by remember { mutableStateOf(prefs.getString("role", "student") ?: "student") }
@@ -202,12 +213,14 @@ private fun ProxyProofRoot() {
                             )
                         )
                         val userData = response.getJSONObject("user")
-                        token = response.getString("access_token")
+                        val issuedToken = response.getString("access_token")
+                        secureTokenStore.write(issuedToken)
+                        token = issuedToken
                         username = userData.optString("username", user.trim())
                         displayName = userData.optString("display_name", username)
                         role = userData.optString("role", "student")
                         prefs.edit()
-                            .putString("access_token", token)
+                            .remove("access_token")
                             .putString("username", username)
                             .putString("display_name", displayName)
                             .putString("role", role)
@@ -231,6 +244,7 @@ private fun ProxyProofRoot() {
             role = role,
             prefs = prefs,
             onLogout = {
+                secureTokenStore.clear()
                 prefs.edit().remove("access_token").apply()
                 token = ""
                 authMessage = ""
