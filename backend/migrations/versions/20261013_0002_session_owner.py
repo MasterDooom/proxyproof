@@ -18,15 +18,15 @@ def upgrade() -> None:
     inspector = sa.inspect(op.get_bind())
     columns = {item["name"] for item in inspector.get_columns("attendance_sessions")}
     if "created_by_user_id" not in columns:
-        op.add_column(
-            "attendance_sessions",
-            sa.Column(
-                "created_by_user_id",
-                sa.Integer(),
-                sa.ForeignKey("users.id"),
-                nullable=True,
-            ),
-        )
+        with op.batch_alter_table("attendance_sessions") as batch_op:
+            batch_op.add_column(
+                sa.Column(
+                    "created_by_user_id",
+                    sa.Integer(),
+                    sa.ForeignKey("users.id"),
+                    nullable=True,
+                )
+            )
     inspector = sa.inspect(op.get_bind())
     indexes = {item["name"] for item in inspector.get_indexes("attendance_sessions")}
     if "ix_attendance_sessions_created_by_user_id" not in indexes:
