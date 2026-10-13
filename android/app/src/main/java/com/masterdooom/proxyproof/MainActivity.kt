@@ -858,14 +858,35 @@ private fun DashboardScreen(
                     isBroadcasting = false
                     return@LaunchedEffect
                 }
-                val json = JSONObject(
-                    ApiClient.request(
-                        apiBase,
-                        "GET",
-                        "/sessions/$selectedBroadcastSessionId/current-token",
-                        token
+                val json = try {
+                    JSONObject(
+                        ApiClient.request(
+                            apiBase,
+                            "GET",
+                            "/sessions/$selectedBroadcastSessionId/current-token",
+                            token
+                        )
                     )
-                )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    if (isAuthenticationRejected(error)) {
+                        onAuthExpired()
+                        return@LaunchedEffect
+                    }
+                    val detail = error.message.orEmpty()
+                    if (
+                        detail.contains("outside the 15-minute attendance window", ignoreCase = true) &&
+                        OffsetDateTime.now().isBefore(attendanceDeadline)
+                    ) {
+                        // The server may be a few seconds behind the device clock at
+                        // the scheduled start; retry before giving up on the session.
+                        bleMessage = "Waiting for the server's attendance window to open…"
+                        delay(1_000)
+                        continue
+                    }
+                    throw error
+                }
                 val payload = BleProtocol.encode(
                     json.getString("session_tag"),
                     json.getString("token")
@@ -898,16 +919,6 @@ private fun DashboardScreen(
                 return@LaunchedEffect
             }
             val detail = error.message.orEmpty()
-            if (
-                detail.contains("outside the 15-minute attendance window", ignoreCase = true) &&
-                OffsetDateTime.now().isBefore(attendanceDeadline)
-            ) {
-                // Device/server clocks can differ by a few seconds at the exact
-                // scheduled start; retry within the still-open class window.
-                bleMessage = "Waiting for the server's attendance window to open…"
-                delay(1_000)
-                continue
-            }
             bleMessage = detail.ifBlank { "Could not start BLE advertising." }
             isBroadcasting = false
         } finally {
