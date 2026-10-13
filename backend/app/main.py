@@ -405,21 +405,22 @@ def list_current_attendance_sessions(
     user: User = Depends(get_current_user),
 ) -> list[SessionOut]:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    query = (
-        select(AttendanceSession)
-        .where(
-            AttendanceSession.status == "open",
-            AttendanceSession.scheduled_start_at <= now,
-            AttendanceSession.attendance_deadline >= now,
-        )
-        .order_by(AttendanceSession.scheduled_start_at)
+    query = select(AttendanceSession).where(
+        AttendanceSession.status == "open",
+        AttendanceSession.attendance_deadline >= now,
     )
     if user.role == "student":
-        query = query.join(
+        # Students see only sessions whose automatic attendance window is open.
+        query = query.where(
+            AttendanceSession.scheduled_start_at <= now
+        ).join(
             RoomEnrollment, RoomEnrollment.room_id == AttendanceSession.room_id
         ).where(RoomEnrollment.user_id == user.id)
     elif user.role == "organiser":
+        # Organisers also need to see future scheduled sessions so they can
+        # select the correct class and begin advertising at the scheduled time.
         query = query.where(AttendanceSession.created_by_user_id == user.id)
+    query = query.order_by(AttendanceSession.scheduled_start_at)
     items = db.scalars(query).unique().all()
     return [session_to_response(item) for item in items]
 
