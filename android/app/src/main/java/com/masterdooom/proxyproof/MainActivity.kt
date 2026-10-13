@@ -87,19 +87,28 @@ import java.util.UUID
 
 private const val PREFS_NAME = "proxyproof_preferences"
 
-private fun requiredBlePermissions(): Array<String> =
+private fun requiredBlePermissions(forAdvertising: Boolean = false): Array<String> =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        arrayOf(
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_ADVERTISE,
-            Manifest.permission.BLUETOOTH_CONNECT
-        )
+        if (forAdvertising) {
+            arrayOf(
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.BLUETOOTH_CONNECT
+            )
+        } else {
+            arrayOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT
+            )
+        }
     } else {
         arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
     }
 
-private fun hasRequiredBlePermissions(context: Context): Boolean =
-    requiredBlePermissions().all {
+private fun hasRequiredBlePermissions(
+    context: Context,
+    forAdvertising: Boolean = false
+): Boolean =
+    requiredBlePermissions(forAdvertising).all {
         ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
     }
 
@@ -575,14 +584,14 @@ private fun DashboardScreen(
     var isScanning by remember { mutableStateOf(false) }
     var selectedBroadcastSessionId by remember { mutableStateOf("") }
     var pendingBleAction by remember { mutableStateOf("") }
-    var blePermissionsGranted by remember { mutableStateOf(hasRequiredBlePermissions(context)) }
+    var blePermissionsGranted by remember { mutableStateOf(hasRequiredBlePermissions(context, forAdvertising = isOrganiser)) }
     val observationsByTag = remember { mutableMapOf<String, MutableList<BleObservation>>() }
     val successfulTags = remember { mutableSetOf<String>() }
     val lastAttemptByTag = remember { mutableMapOf<String, Long>() }
     val blePermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
-        blePermissionsGranted = hasRequiredBlePermissions(context)
+        blePermissionsGranted = hasRequiredBlePermissions(context, forAdvertising = isOrganiser)
         if (!blePermissionsGranted) {
             bleMessage = "Nearby-device permission was denied. Allow Bluetooth access in Settings and retry."
             pendingBleAction = ""
@@ -1197,9 +1206,9 @@ private fun DashboardScreen(
                                 bleMessage = "BLE broadcast stopped."
                             } else if (!advertiser.isSupported()) {
                                 bleMessage = "This phone cannot advertise BLE. Use the clearly labelled manual attendance fallback."
-                            } else if (!hasRequiredBlePermissions(context)) {
+                            } else if (!hasRequiredBlePermissions(context, forAdvertising = true)) {
                                 pendingBleAction = "advertise"
-                                blePermissionLauncher.launch(requiredBlePermissions())
+                                blePermissionLauncher.launch(requiredBlePermissions(forAdvertising = true))
                             } else {
                                 isBroadcasting = true
                             }
