@@ -2,7 +2,11 @@ name: Android APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, "ship/proxyproof-readiness"]
+    paths:
+      - "android/**"
+      - ".github/workflows/android-apk.yml"
+  pull_request:
     paths:
       - "android/**"
       - ".github/workflows/android-apk.yml"
@@ -44,7 +48,7 @@ jobs:
         working-directory: android
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon :app:assembleDebug
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
 
       - name: Upload installable APK
         uses: actions/upload-artifact@v4
