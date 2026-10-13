@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.database import Base, get_db
+from app.database import Base, get_db, normalize_database_url
 from app.main import app
 from app.models import AttendanceSession
 
@@ -410,4 +410,15 @@ def test_submission_is_rejected_after_the_15_minute_deadline(client: TestClient)
     )
     assert response.status_code == 422
     assert "window" in response.json()["detail"].lower()
+
+
+
+def test_database_url_normalizes_render_postgres_schemes():
+    assert normalize_database_url(
+        "postgresql://user:pass@host:5432/db"
+    ) == "postgresql+psycopg://user:pass@host:5432/db"
+    assert normalize_database_url(
+        "postgres://user:pass@host:5432/db"
+    ) == "postgresql+psycopg://user:pass@host:5432/db"
+    assert normalize_database_url("sqlite:///./proxyproof.db") == "sqlite:///./proxyproof.db"
 
