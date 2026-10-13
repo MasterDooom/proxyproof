@@ -486,8 +486,12 @@ private fun DashboardScreen(
     var roomCode by remember { mutableStateOf("") }
     var roomName by remember { mutableStateOf("") }
     var subject by remember { mutableStateOf("Engineering Mathematics") }
+    var scheduledStartText by remember {
+        mutableStateOf(OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME))
+    }
     var selectedRoomId by remember { mutableStateOf(0) }
     var roomMenuExpanded by remember { mutableStateOf(false) }
+    var broadcastMenuExpanded by remember { mutableStateOf(false) }
     var selectedRosterSession by remember { mutableStateOf("") }
     var roster by remember { mutableStateOf(emptyList<RosterItem>()) }
     var rosterBusy by remember { mutableStateOf(false) }
@@ -553,7 +557,30 @@ private fun DashboardScreen(
 
     LaunchedEffect(sessions) {
         if (selectedBroadcastSessionId.isBlank() || sessions.none { it.id == selectedBroadcastSessionId }) {
+            isBroadcasting = false
             selectedBroadcastSessionId = sessions.firstOrNull()?.id.orEmpty()
+        }
+    }
+
+    LaunchedEffect(isOrganiser, selectedRosterSession, apiBase, token) {
+        if (!isOrganiser || selectedRosterSession.isBlank()) return@LaunchedEffect
+        while (isActive) {
+            delay(4_000)
+            try {
+                val response = JSONObject(
+                    ApiClient.request(
+                        apiBase,
+                        "GET",
+                        "/sessions/$selectedRosterSession/attendance",
+                        token
+                    )
+                )
+                roster = parseRoster(response.optJSONArray("records") ?: JSONArray())
+            } catch (_: CancellationException) {
+                throw
+            } catch (_: Exception) {
+                // Preserve the last roster on a transient polling failure; manual refresh remains available.
+            }
         }
     }
 
@@ -843,7 +870,15 @@ private fun DashboardScreen(
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(value = subject, onValueChange = { subject = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Subject / class") }, singleLine = true)
                 Spacer(Modifier.height(8.dp))
-                Text("Scheduled start: now · deadline: now + 15 min", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                OutlinedTextField(
+                    value = scheduledStartText,
+                    onValueChange = { scheduledStartText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Scheduled start (ISO 8601 with offset)") },
+                    placeholder = { Text("2026-10-13T08:00:00+05:30") },
+                    supportingText = { Text("The server closes automatic attendance 15 minutes after this time.") },
+                    singleLine = true
+                )
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = {
@@ -854,7 +889,7 @@ private fun DashboardScreen(
                                 val body = JSONObject()
                                     .put("room_id", selectedRoomId)
                                     .put("subject_label", subject.trim())
-                                    .put("scheduled_start_at", start)
+                                    .put("scheduled_start_at", scheduledStartText.trim())
                                 val created = JSONObject(ApiClient.request(apiBase, "POST", "/sessions", token, body))
                                 message = "Attendance session created for ${created.optString("room_name")}. Start its BLE broadcast below."
                                 loadData()
@@ -865,7 +900,7 @@ private fun DashboardScreen(
                             }
                         }
                     },
-                    enabled = !busyAction && selectedRoomId > 0 && subject.isNotBlank(),
+                    enabled = !busyAction && selectedRoomId > 0 && subject.isNotBlank() && scheduledStartText.isNotBlank(),
                     modifier = Modifier.fillMaxWidth().height(50.dp),
                     shape = RoundedCornerShape(14.dp)
                 ) {
@@ -881,7 +916,7 @@ private fun DashboardScreen(
                 } else {
                     Box {
                         OutlinedButton(
-                            onClick = { roomMenuExpanded = !roomMenuExpanded },
+                            onClick = { broadcastMenuExpanded = !broadcastMenuExpanded },
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(13.dp)
                         ) {
@@ -895,15 +930,15 @@ private fun DashboardScreen(
                             Text("⌄")
                         }
                         DropdownMenu(
-                            expanded = roomMenuExpanded,
-                            onDismissRequest = { roomMenuExpanded = false }
+                            expanded = broadcastMenuExpanded,
+                            onDismissRequest = { broadcastMenuExpanded = false }
                         ) {
                             sessions.forEach { session ->
                                 DropdownMenuItem(
                                     text = { Text("${session.roomName} · ${session.subject}") },
                                     onClick = {
                                         selectedBroadcastSessionId = session.id
-                                        roomMenuExpanded = false
+                                        broadcastMenuExpanded = false
                                     }
                                 )
                             }
