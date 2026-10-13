@@ -615,6 +615,7 @@ private fun DashboardScreen(
     var rooms by remember { mutableStateOf(emptyList<RoomItem>()) }
     var enrolledRoomIds by remember { mutableStateOf(emptySet<Int>()) }
     var sessions by remember { mutableStateOf(emptyList<SessionItem>()) }
+    var sessionHistory by remember { mutableStateOf(emptyList<SessionItem>()) }
     var history by remember { mutableStateOf(emptyList<HistoryItem>()) }
     var attendancePercentage by remember { mutableStateOf(0.0) }
     var totalEligible by remember { mutableStateOf(0) }
@@ -682,11 +683,15 @@ private fun DashboardScreen(
             }
             if (isOrganiser) {
                 enrolledRoomIds = emptySet()
+                sessionHistory = parseSessions(
+                    JSONArray(ApiClient.request(apiBase, "GET", "/sessions/my", token))
+                )
                 history = emptyList()
                 attendancePercentage = 0.0
                 totalEligible = 0
                 totalPresent = 0
             } else {
+                sessionHistory = emptyList()
                 enrolledRoomIds = parseRooms(JSONArray(ApiClient.request(apiBase, "GET", "/rooms/my", token)))
                     .map { it.id }.toSet()
             }
@@ -1237,6 +1242,40 @@ private fun DashboardScreen(
                 }
             }
 
+            PPPanel {
+                SectionHeading("SESSION HISTORY", "Recent sessions you own, including expired and closed sessions.")
+                Spacer(Modifier.height(10.dp))
+                val pastSessions = sessionHistory.filterNot { prior ->
+                    sessions.any { active -> active.id == prior.id }
+                }
+                if (pastSessions.isEmpty()) {
+                    EmptyState("No past sessions yet.", "Sessions will appear here after they leave the live list.")
+                } else {
+                    pastSessions.forEach { session ->
+                        SessionCard(
+                            session = session,
+                            organiser = true,
+                            onClose = if (session.status == "closed") null else {
+                                {
+                                    scope.launch {
+                                        try {
+                                            ApiClient.request(apiBase, "POST", "/sessions/${session.id}/close", token)
+                                            message = "Session closed."
+                                            loadData()
+                                        } catch (error: Exception) {
+                                            if (isAuthenticationRejected(error)) onAuthExpired()
+                                            else message = error.message ?: "Could not close session."
+                                        }
+                                    }
+                                }
+                            },
+                            onViewRoster = { scope.launch { loadRoster(session.id) } }
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
+            }
+
             if (selectedRosterSession.isNotBlank()) {
                 PPPanel {
                     SectionHeading("ATTENDANCE ROSTER", "Manual changes are labelled and recorded separately from BLE.")
@@ -1614,7 +1653,16 @@ private fun SessionCard(
                     Spacer(Modifier.height(3.dp))
                     Text(session.roomName, color = MaterialTheme.colorScheme.secondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
-                StatusPill(if (session.attendanceOpen) "OPEN" else session.status.uppercase(), session.attendanceOpen)
+                val scheduledInFuture = runCatching {
+                    OffsetDateTime.parse(session.scheduledStart).isAfter(OffsetDateTime.now())
+                }.getOrDefault(false)
+                val statusLabel = when {
+                    session.status.equals("closed", ignoreCase = true) -> "CLOSED"
+                    session.attendanceOpen -> "ATTENDANCE OPEN"
+                    scheduledInFuture -> "SCHEDULED"
+                    else -> "WINDOW CLOSED"
+                }
+                StatusPill(statusLabel, session.attendanceOpen)
             }
             Spacer(Modifier.height(9.dp))
             Text(
@@ -1629,7 +1677,9 @@ private fun SessionCard(
                 Spacer(Modifier.height(7.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { onViewRoster?.invoke() }, shape = RoundedCornerShape(11.dp)) { Text("View roster") }
-                    TextButton(onClick = { onClose?.invoke() }) { Text("Close session", color = MaterialTheme.colorScheme.error) }
+                    if (onClose != null) {
+                        TextButton(onClick = onClose) { Text("Close session", color = MaterialTheme.colorScheme.error) }
+                    }
                 }
             }
         }
