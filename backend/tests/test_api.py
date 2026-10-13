@@ -562,3 +562,12 @@ def test_production_login_rate_limit_returns_429(client: TestClient, monkeypatch
     )
     assert limited.status_code == 429
     assert int(limited.headers["Retry-After"]) > 0
+
+def test_logout_revokes_only_the_current_access_token(client: TestClient):
+    user = register_user(client, "logout_student")
+    revoked = client.post("/auth/logout", headers=user["headers"])
+    assert revoked.status_code == 204
+    assert client.get("/auth/me", headers=user["headers"]).status_code == 401
+
+    other = register_user(client, "logout_other_student")
+    assert client.get("/auth/me", headers=other["headers"]).status_code == 200
