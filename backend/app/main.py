@@ -37,6 +37,7 @@ from .schemas import (
     AttendanceRosterResponse,
     AuthResponse,
     BleAttendanceRequest,
+    BleEligibilityOut,
     BleTokenOut,
     DeviceOut,
     DeviceRegisterRequest,
@@ -78,6 +79,8 @@ app = FastAPI(
 _RATE_LIMITS = {
     "/auth/login": (10, 60),
     "/auth/register": (5, 3600),
+    "/attendance/ble/eligibility": (30, 60),
+    "/attendance/ble": (30, 60),
 }
 _rate_limit_state: dict[tuple[str, str], tuple[float, int]] = {}
 _rate_limit_lock = Lock()
@@ -625,12 +628,12 @@ def manual_attendance(
     return roster_item(student, record)
 
 
-@app.post("/attendance/ble", response_model=AttendanceMarkedResponse)
-def submit_ble_attendance(
+def validate_ble_candidate(
     payload: BleAttendanceRequest,
-    db: Session = Depends(get_db),
-    student: User = Depends(require_role("student")),
-) -> AttendanceMarkedResponse:
+    db: Session,
+    student: User,
+) -> tuple[AttendanceSession, Device, AttendanceRecord | None]:
+    """Validate a detected beacon without creating an attendance record."""
     device = db.scalar(
         select(Device).where(Device.user_id == student.id, Device.is_active.is_(True))
     )
@@ -662,6 +665,34 @@ def submit_ble_attendance(
             AttendanceRecord.student_id == student.id,
         )
     )
+    return session, device, existing
+
+
+@app.post("/attendance/ble/eligibility", response_model=BleEligibilityOut)
+def check_ble_eligibility(
+    payload: BleAttendanceRequest,
+    db: Session = Depends(get_db),
+    student: User = Depends(require_role("student")),
+) -> BleEligibilityOut:
+    """Check whether a nearby session could mark this student without marking them yet."""
+    session, _device, existing = validate_ble_candidate(payload, db, student)
+    return BleEligibilityOut(
+        session_id=session.id,
+        room_name=session.room.display_name,
+        subject_label=session.subject_label,
+        attendance_deadline=as_utc(session.attendance_deadline),
+        eligible=existing is None,
+        already_marked=existing is not None,
+    )
+
+
+@app.post("/attendance/ble", response_model=AttendanceMarkedResponse)
+def submit_ble_attendance(
+    payload: BleAttendanceRequest,
+    db: Session = Depends(get_db),
+    student: User = Depends(require_role("student")),
+) -> AttendanceMarkedResponse:
+    session, device, existing = validate_ble_candidate(payload, db, student)
     if existing is not None:
         raise HTTPException(status_code=409, detail="Attendance is already recorded for this session.")
 
