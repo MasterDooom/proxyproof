@@ -516,7 +516,11 @@ private fun DashboardScreen(
             prefs.edit().putString("device_key", it).apply()
         }
     }
-    var deviceRegistered by remember { mutableStateOf(prefs.getBoolean("device_registered", false)) }
+    var deviceRegistered by remember(username) {
+        mutableStateOf(
+            prefs.getString("device_registered_username", null) == username
+        )
+    }
 
     suspend fun loadData() {
         loading = true
@@ -1120,7 +1124,10 @@ private fun DashboardScreen(
                                     JSONObject().put("device_key", deviceKey)
                                 )
                                 deviceRegistered = true
-                                prefs.edit().putBoolean("device_registered", true).apply()
+                                prefs.edit()
+                                    .putString("device_registered_username", username)
+                                    .remove("device_registered")
+                                    .apply()
                                 message = "This installation is registered to your account."
                             } catch (error: Exception) {
                                 message = error.message ?: "Device registration failed."
