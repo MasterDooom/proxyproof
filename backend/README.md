@@ -35,9 +35,9 @@ The Blueprint defines:
 - A generated `PROXYPROOF_TOKEN_SECRET`.
 - A one-time prompted `PROXYPROOF_ORGANISER_INVITE_CODE`; set a private code and keep it to create your organiser account.
 
-Wait for deployment to finish and test `https://YOUR-SERVICE.onrender.com/health`. The health check executes `SELECT 1` against the configured database. If it fails, check the deploy logs and Render environment settings.
+The existing hosted service is live at `https://proxyproof-api.onrender.com`. For immediate internal testing it currently uses `sqlite:///./proxyproof.db`; `/health` runs `SELECT 1` and returns `storage_backend` plus `storage_warning`. This SQLite file is on Render's temporary filesystem and is not durable. Before keeping real attendance records, set `DATABASE_URL` to the provisioned PostgreSQL **Internal Database URL** from the Render dashboard. Never commit or share that URL.
 
-The database URL is normalised from Render's `postgresql://` format to `postgresql+psycopg://`; `psycopg[binary]` is installed from requirements. Local development defaults to SQLite. Hosted deployments refuse to start without `DATABASE_URL` instead of silently using ephemeral SQLite. Versioned Alembic migrations run before Uvicorn starts; the baseline migration adopts existing prototype tables without dropping them, and additive migrations add session and room ownership safely.
+The database URL is normalised from Render's `postgresql://` format to `postgresql+psycopg://`; `psycopg[binary]` is installed from requirements. Local development defaults to SQLite. Hosted deployments refuse to start when `DATABASE_URL` is missing. The current explicit SQLite demo setting is a temporary exception for internal testing, not a persistent database. Hosted startup runs versioned Alembic migrations; the baseline adopts existing prototype tables without dropping them, and additive migrations add session and room ownership safely.
 
 ## API happy path
 
