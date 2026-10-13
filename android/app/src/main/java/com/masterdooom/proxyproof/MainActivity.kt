@@ -64,7 +64,6 @@ import java.util.Locale
 import java.util.UUID
 
 private const val PREFS_NAME = "proxyproof_preferences"
-private const val DEFAULT_API_URL = "http://10.0.2.2:8000"
 
 private data class RoomItem(
     val id: Int,
@@ -117,8 +116,9 @@ class MainActivity : ComponentActivity() {
 private fun ProxyProofRoot() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
+    val defaultApiUrl = remember { context.getString(R.string.default_api_url) }
     var apiBase by remember {
-        mutableStateOf(prefs.getString("api_base", DEFAULT_API_URL) ?: DEFAULT_API_URL)
+        mutableStateOf(prefs.getString("api_base", defaultApiUrl) ?: defaultApiUrl)
     }
     var token by remember { mutableStateOf(prefs.getString("access_token", "") ?: "") }
     var username by remember { mutableStateOf(prefs.getString("username", "") ?: "") }
