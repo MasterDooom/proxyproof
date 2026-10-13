@@ -605,6 +605,12 @@ private fun DashboardScreen(
     }
     DisposableEffect(lifecycleOwner, advertiser, scanner) {
         val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) {
+                blePermissionsGranted = hasRequiredBlePermissions(
+                    context,
+                    forAdvertising = isOrganiser
+                )
+            }
             if (event == Lifecycle.Event.ON_STOP) {
                 // Keep BLE foreground-only; background attendance is not promised.
                 advertiser.stop()
@@ -827,7 +833,19 @@ private fun DashboardScreen(
                 )
                 if (lastPayload == null || !lastPayload!!.contentEquals(payload)) {
                     advertiser.start(payload) { status ->
-                        scope.launch(Dispatchers.Main.immediate) { bleMessage = status }
+                        scope.launch(Dispatchers.Main.immediate) {
+                            bleMessage = status
+                            if (
+                                status.contains("failed", ignoreCase = true) ||
+                                status.contains("turned off", ignoreCase = true) ||
+                                status.contains("not available", ignoreCase = true) ||
+                                status.contains("unavailable", ignoreCase = true) ||
+                                status.contains("permission is missing", ignoreCase = true) ||
+                                status.contains("does not support", ignoreCase = true)
+                            ) {
+                                isBroadcasting = false
+                            }
+                        }
                     }
                     lastPayload = payload
                 }
@@ -1204,11 +1222,11 @@ private fun DashboardScreen(
                                 isBroadcasting = false
                                 advertiser.stop()
                                 bleMessage = "BLE broadcast stopped."
-                            } else if (!advertiser.isSupported()) {
-                                bleMessage = "This phone cannot advertise BLE. Use the clearly labelled manual attendance fallback."
                             } else if (!hasRequiredBlePermissions(context, forAdvertising = true)) {
                                 pendingBleAction = "advertise"
                                 blePermissionLauncher.launch(requiredBlePermissions(forAdvertising = true))
+                            } else if (!advertiser.isSupported()) {
+                                bleMessage = "This phone cannot advertise BLE. Use the clearly labelled manual attendance fallback."
                             } else {
                                 isBroadcasting = true
                             }
@@ -1453,11 +1471,11 @@ private fun DashboardScreen(
                             bleMessage = "Register this phone before scanning for attendance."
                         } else if (sessions.isEmpty()) {
                             bleMessage = "No eligible sessions are active in your enrolled rooms."
-                        } else if (!scanner.isSupported()) {
-                            bleMessage = "This phone does not support BLE scanning."
                         } else if (!hasRequiredBlePermissions(context)) {
                             pendingBleAction = "scan"
                             blePermissionLauncher.launch(requiredBlePermissions())
+                        } else if (!scanner.isSupported()) {
+                            bleMessage = "This phone does not support BLE scanning."
                         } else {
                             observationsByTag.clear()
                             successfulTags.clear()
