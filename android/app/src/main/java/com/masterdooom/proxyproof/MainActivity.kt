@@ -842,7 +842,7 @@ private fun DashboardScreen(
                                     .put("subject_label", subject.trim())
                                     .put("scheduled_start_at", start)
                                 val created = JSONObject(ApiClient.request(apiBase, "POST", "/sessions", token, body))
-                                message = "Attendance session created for ${created.optString("room_name")}. BLE broadcast is the next integration step."
+                                message = "Attendance session created for ${created.optString("room_name")}. Start its BLE broadcast below."
                                 loadData()
                             } catch (error: Exception) {
                                 message = error.message ?: "Could not start the session."
@@ -857,6 +857,86 @@ private fun DashboardScreen(
                 ) {
                     Text("Start attendance session")
                 }
+            }
+
+            PPPanel {
+                SectionHeading("BLE BROADCAST", "Advertise the rotating session token from this organiser phone.")
+                Spacer(Modifier.height(8.dp))
+                if (sessions.isEmpty()) {
+                    EmptyState("No eligible session to broadcast.", "Start a session during its scheduled attendance window.")
+                } else {
+                    Box {
+                        OutlinedButton(
+                            onClick = { roomMenuExpanded = !roomMenuExpanded },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(13.dp)
+                        ) {
+                            val chosen = sessions.firstOrNull { it.id == selectedBroadcastSessionId }
+                            Text(
+                                chosen?.let { "${it.roomName} · ${it.subject}" } ?: "Select active session",
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text("⌄")
+                        }
+                        DropdownMenu(
+                            expanded = roomMenuExpanded,
+                            onDismissRequest = { roomMenuExpanded = false }
+                        ) {
+                            sessions.forEach { session ->
+                                DropdownMenuItem(
+                                    text = { Text("${session.roomName} · ${session.subject}") },
+                                    onClick = {
+                                        selectedBroadcastSessionId = session.id
+                                        roomMenuExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            if (isBroadcasting) {
+                                isBroadcasting = false
+                                advertiser.stop()
+                                bleMessage = "BLE broadcast stopped."
+                            } else if (!advertiser.isSupported()) {
+                                bleMessage = "This phone cannot advertise BLE. Use the clearly labelled manual attendance fallback."
+                            } else if (!hasRequiredBlePermissions(context)) {
+                                pendingBleAction = "advertise"
+                                blePermissionLauncher.launch(requiredBlePermissions())
+                            } else {
+                                isBroadcasting = true
+                            }
+                        },
+                        enabled = selectedBroadcastSessionId.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isBroadcasting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Text(if (isBroadcasting) "Stop BLE broadcast" else "Start BLE broadcast")
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+                Text(
+                    bleMessage,
+                    color = if (bleMessage.contains("failed", true) || bleMessage.contains("missing", true) ||
+                        bleMessage.contains("cannot", true) || bleMessage.contains("unavailable", true)
+                    ) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    "Foreground only. Prototype manufacturer ID 0xFFFF is development-only and must be replaced before public release.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
             }
 
             PPPanel {
@@ -964,7 +1044,7 @@ private fun DashboardScreen(
                     MetricBlock("$totalPresent / $totalEligible", "PRESENT", Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(8.dp))
-                Text("BLE scanning will be enabled in the next APK build. This version connects your account, device and rooms to the server.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, lineHeight = 17.sp)
+                Text("Automatic attendance uses foreground BLE discovery and must be confirmed by the server. Keep this screen open and Bluetooth enabled.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, lineHeight = 17.sp)
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = {
@@ -993,6 +1073,70 @@ private fun DashboardScreen(
                 }
                 Spacer(Modifier.height(6.dp))
                 Text("Installation ID: ${deviceKey.take(8)}…", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+            }
+
+            PPPanel {
+                SectionHeading("BLE ATTENDANCE", "Keep this screen open while the app looks for your enrolled room's beacon.")
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusPill(
+                        text = if (isScanning) "SCANNING" else "STOPPED",
+                        positive = isScanning
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (!blePermissionsGranted) "Nearby-device permission required"
+                        else if (!deviceRegistered) "Register this phone first"
+                        else "Foreground scan only",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = {
+                        if (isScanning) {
+                            isScanning = false
+                            scanner.stop()
+                            bleMessage = "BLE scanning stopped."
+                        } else if (!deviceRegistered) {
+                            bleMessage = "Register this phone before scanning for attendance."
+                        } else if (sessions.isEmpty()) {
+                            bleMessage = "No eligible sessions are active in your enrolled rooms."
+                        } else if (!scanner.isSupported()) {
+                            bleMessage = "This phone does not support BLE scanning."
+                        } else if (!hasRequiredBlePermissions(context)) {
+                            pendingBleAction = "scan"
+                            blePermissionLauncher.launch(requiredBlePermissions())
+                        } else {
+                            observationsByTag.clear()
+                            successfulTags.clear()
+                            lastAttemptByTag.clear()
+                            isScanning = true
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    enabled = isScanning || (deviceRegistered && sessions.isNotEmpty())
+                ) {
+                    Text(if (isScanning) "Stop scanning" else "Start attendance scan")
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    bleMessage,
+                    color = if (bleMessage.contains("failed", true) || bleMessage.contains("could not", true) ||
+                        bleMessage.contains("denied", true) || bleMessage.contains("ambiguous", true)
+                    ) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    "The backend validates the rotating token, registered device, enrolment, session and 15-minute cutoff. Signal strength is only a heuristic.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
             }
 
             PPPanel {
