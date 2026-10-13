@@ -224,7 +224,9 @@ private fun ProxyProofRoot() {
                         )
                         if (result.optString("status") == "ok") {
                             connectionStatus = "Healthy"
-                            connectionMessage = "API and configured datastore responded successfully."
+                            connectionMessage = result.optString("storage_warning").ifBlank {
+                                "API and configured datastore responded successfully."
+                            }
                         } else {
                             connectionStatus = "Unavailable"
                             connectionMessage = "The health endpoint returned an unexpected response."
