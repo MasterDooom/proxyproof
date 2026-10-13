@@ -51,7 +51,7 @@ def test_migrations_build_a_fresh_database(tmp_path: Path):
         assert "created_by_user_id" in session_columns
         assert engine.connect().execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20261013_0002"
+        ).scalar_one() == "20261013_0003"
     finally:
         engine.dispose()
 
