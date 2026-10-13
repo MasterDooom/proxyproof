@@ -58,6 +58,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.core.content.ContextCompat
 import com.masterdooom.proxyproof.data.ApiClient
 import com.masterdooom.proxyproof.ble.BleAdvertiser
@@ -440,6 +443,7 @@ private fun DashboardScreen(
     val scope = rememberCoroutineScope()
     val isOrganiser = role == "organiser"
     val context = LocalContext.current
+    val lifecycleOwner = context as? LifecycleOwner
     val advertiser = remember(context) { BleAdvertiser(context) }
     val scanner = remember(context) { BleScanner(context) }
     var bleMessage by remember { mutableStateOf("BLE attendance is stopped.") }
@@ -466,8 +470,20 @@ private fun DashboardScreen(
             pendingBleAction = ""
         }
     }
-    DisposableEffect(advertiser, scanner) {
+    DisposableEffect(lifecycleOwner, advertiser, scanner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                // Keep BLE foreground-only; background attendance is not promised.
+                advertiser.stop()
+                scanner.stop()
+                isBroadcasting = false
+                isScanning = false
+                bleMessage = "BLE paused when ProxyProof left the foreground. Return and start it again when ready."
+            }
+        }
+        lifecycleOwner?.lifecycle?.addObserver(observer)
         onDispose {
+            lifecycleOwner?.lifecycle?.removeObserver(observer)
             advertiser.stop()
             scanner.stop()
         }
