@@ -4,6 +4,7 @@ This service is intended for local demos, not public deployment. BLE RSSI is
 a rough proximity heuristic and cannot prove someone is inside a classroom.
 """
 import csv
+import hmac
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -158,7 +159,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> AuthRes
 
     if payload.role == "organiser":
         supplied = payload.organiser_invite_code or ""
-        if not __import__("hmac").compare_digest(supplied, ORGANISER_INVITE_CODE):
+        if not hmac.compare_digest(supplied, ORGANISER_INVITE_CODE):
             raise HTTPException(status_code=403, detail="A valid organiser invite code is required.")
 
     if db.scalar(select(User).where(User.username == username)):
