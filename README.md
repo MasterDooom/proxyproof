@@ -12,7 +12,7 @@ ProxyProof is an Android-first prototype for room-specific BLE-assisted attendan
 - [x] Compact room-session BLE tag and 20-second HMAC token
 - [x] Server-enforced 15-minute attendance window
 - [x] Duplicate prevention, manual attendance correction, student history and CSV export
-- [x] Backend API tests and GitHub Actions workflow
+- [x] Backend API tests and GitHub Actions workflow (13 tests passing in CI as of 2026-10-13)
 - [ ] Android Compose screens connected to API
 - [ ] Android BLE advertisement/scanning integration
 - [ ] Real-device end-to-end verification
