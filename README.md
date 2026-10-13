@@ -1,25 +1,36 @@
 # ProxyProof — Bluetooth Attendance
 
-ProxyProof is an Android-first prototype for room-specific BLE-assisted attendance. The organiser starts a session for a room, and enrolled students can be marked automatically when their registered phone observes the room's short-lived BLE advertisement.
+ProxyProof is an Android-first prototype for room-specific BLE-assisted attendance. Organisers create room sessions; students register their phone and join rooms. BLE advertiser/scanner integration is the next stage.
 
-## Current implementation
+## Implemented
 
-- [x] Project scope, architecture and delivery rules in [project.md](project.md)
-- [x] FastAPI + SQLite backend with room and session APIs
-- [x] Student/organiser registration and login with bearer-token authentication
-- [x] One registered installation ID per student account
-- [x] Student room enrollment
-- [x] Compact room-session BLE tag and 20-second HMAC token
-- [x] Server-enforced 15-minute attendance window
-- [x] Duplicate prevention, manual attendance correction, student history and CSV export
-- [x] Backend API tests and GitHub Actions workflow (13 tests passing in CI as of 2026-10-13)
-- [ ] Android Compose screens connected to API
-- [ ] Android BLE advertisement/scanning integration
-- [ ] Real-device end-to-end verification
+- [x] Scope and architecture in [project.md](project.md)
+- [x] FastAPI + SQLite backend with authentication and role checks
+- [x] One app-installation device key per student account
+- [x] Room creation/listing and student room enrolment
+- [x] Scheduled sessions with a server-enforced 15-minute attendance window
+- [x] Rotating compact BLE tokens and server-side BLE attendance endpoint
+- [x] Duplicate rejection, manual attendance correction, history, percentage and CSV export
+- [x] Backend tests: 13 passed in CI
+- [x] Android Jetpack Compose login/register and student/organiser screens
+- [x] Android APK build workflow
+- [ ] Actual Android BLE advertising/scanning
+- [ ] Real-device BLE end-to-end verification
+
+## Build/download the APK
+
+GitHub Actions builds an installable **debug APK** on Android-source pushes.
+
+1. Open [Android APK workflow runs](https://github.com/MasterDooom/proxyproof/actions/workflows/android-apk.yml).
+2. Open the latest run with a green check.
+3. At the bottom, under **Artifacts**, download `proxyproof-debug-apk`.
+4. Extract the ZIP to get `app-debug.apk`, transfer it to your Android phone, and install it. Android may ask you to allow installing apps from that source.
+
+The APK is a development build; BLE scanning/advertising is not enabled yet.
 
 ## Run the backend on Windows
 
-In CMD or PowerShell:
+From the repository root:
 
 ```powershell
 cd backend
@@ -32,57 +43,32 @@ Health check: <http://127.0.0.1:8000/health>
 
 Interactive API docs: <http://127.0.0.1:8000/docs>
 
-Run backend tests in a separate terminal:
+Run tests in a second terminal:
 
 ```powershell
 cd backend
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-## Local demo account setup
+## Connecting the phone to your laptop
 
-Use `POST /auth/register` to create a student account. Organiser registration requires the development invite code `local-demo-organiser-code` unless `PROXYPROOF_ORGANISER_INVITE_CODE` is set in the environment before starting the server.
+1. Keep the backend running with `--host 0.0.0.0`.
+2. Put the phone and laptop on the same Wi-Fi network.
+3. Run `ipconfig` on Windows and find the laptop's IPv4 address for the active Wi-Fi adapter.
+4. In the app's Server URL field, enter `http://YOUR_LAPTOP_IPV4:8000`, e.g. `http://192.168.1.20:8000`.
+5. If the phone cannot connect, allow Python/Uvicorn through Windows Defender Firewall on private networks.
+6. Use the health route from the phone browser first: `http://YOUR_LAPTOP_IPV4:8000/health`.
 
-Student example:
+The default `http://10.0.2.2:8000` URL is for Android emulator networking, not physical phones.
 
-```json
-{
-  "username": "alice",
-  "display_name": "Alice",
-  "password": "correct-horse-123",
-  "role": "student"
-}
-```
+## Demo accounts
 
-Organiser example:
+Register a student with `POST /auth/register`. To register an organiser, include the local invite code `local-demo-organiser-code`. Replace these defaults before any deployment.
 
-```json
-{
-  "username": "teacher",
-  "display_name": "Demo Organiser",
-  "password": "correct-horse-123",
-  "role": "organiser",
-  "organiser_invite_code": "local-demo-organiser-code"
-}
-```
+## Attendance deadline
 
-Register a student phone using `POST /devices/register` with a random per-installation `device_key` (the Android app will generate and retain a UUID). Enrol the student in a room with `POST /rooms/{room_id}/enroll`.
-
-## Key attendance rule
-
-Automatic attendance is accepted only from the scheduled class start through the next 15 minutes. For an 08:00 class, the server-side deadline is 08:15, even if the organiser starts the app late. The class continues; only the attendance window closes. The organiser can still make a clearly labelled manual correction.
-
-The BLE payload uses a 6-byte random session tag and an 8-byte HMAC token that rotates every 20 seconds. The backend accepts the current or immediately previous token slot to tolerate a packet arriving at a rotation boundary. The separate 15-minute attendance deadline remains authoritative.
-
-## API flow
-
-1. Register/login as an organiser and use its bearer token to create a room.
-2. Register/login as a student, register the student's installation key, and enrol them in the room.
-3. Create a session with a timezone-aware `scheduled_start_at`.
-4. On the organiser phone, poll `GET /sessions/{session_id}/current-token` and advertise the returned compact `session_tag` + `token`.
-5. On the student phone, scan the BLE payload and submit `POST /attendance/ble` with `session_tag`, `token`, and observed `rssi`.
-6. Use `GET /sessions/{session_id}/attendance` for the organiser roster, `GET /attendance/me` for student history, and `GET /attendance/export.csv?session_id=...` to export the session.
+Automatic attendance is accepted from the scheduled class start through the next 15 minutes. An 08:00 class deadline is 08:15, irrespective of when the organiser opens the app. The class itself continues after that cutoff; only attendance submission closes.
 
 ## Security limitations
 
-This is a local prototype, not production-ready identity or attendance security. The development organiser invite code and token secret must be replaced before deployment; configure a long random `PROXYPROOF_TOKEN_SECRET` environment variable. Device binding uses an app-generated UUID and is not hardware-backed attestation. RSSI is client-reported and can be spoofed. BLE range cannot reliably distinguish a student inside a room from someone standing outside it. Do not expose this API publicly without HTTPS, secret management, rate limiting, stronger role provisioning and security review.
+This is a local prototype, not production-ready attendance security. The development organiser invite code and token secret must be replaced before deployment. Device binding uses an app-generated UUID and is not hardware-backed. RSSI is client-reported and cannot reliably establish whether someone is inside a classroom rather than outside the wall.
