@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db, normalize_database_url
 from app.main import app
-from app.models import AttendanceSession
+from app.models import AttendanceSession, User
 
 test_engine = create_engine(
     "sqlite://",
@@ -490,3 +490,32 @@ def test_organisers_cannot_create_sessions_for_another_organisers_room(client: T
     assert create_session(client, first, first_room_id).status_code == 201
     assert create_session(client, second, second_room_id).status_code == 201
     assert create_session(client, first, second_room_id).status_code == 403
+
+def test_csv_export_neutralises_spreadsheet_formulas(client: TestClient):
+    organiser = register_user(client, "csv_teacher", role="organiser")
+    student = register_user(client, "csv_student")
+    room_id = create_room(client, organiser, "601")
+    enroll(client, student, room_id)
+    session = create_session(
+        client,
+        organiser,
+        room_id,
+        subject="=1+1",
+    ).json()
+
+    db = TestSessionLocal()
+    try:
+        student_row = db.get(User, student["user"]["id"])
+        student_row.display_name = "=HYPERLINK(\"https://example.invalid\",\"click\")"
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get(
+        "/attendance/export.csv",
+        params={"session_id": session["id"]},
+        headers=organiser["headers"],
+    )
+    assert response.status_code == 200
+    assert "'=HYPERLINK" in response.text
+    assert "'=1+1" in response.text
