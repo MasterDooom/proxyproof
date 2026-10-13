@@ -422,3 +422,50 @@ def test_database_url_normalizes_render_postgres_schemes():
     ) == "postgresql+psycopg://user:pass@host:5432/db"
     assert normalize_database_url("sqlite:///./proxyproof.db") == "sqlite:///./proxyproof.db"
 
+def test_organiser_can_only_manage_their_own_sessions(client: TestClient):
+    owner = register_user(client, "owner_teacher", role="organiser")
+    other = register_user(client, "other_teacher", role="organiser")
+    room_id = create_room(client, owner, "401")
+    response = create_session(client, owner, room_id)
+    assert response.status_code == 201, response.text
+    session_id = response.json()["id"]
+
+    assert client.get(
+        f"/sessions/{session_id}",
+        headers=owner["headers"],
+    ).status_code == 200
+    assert client.get(
+        f"/sessions/{session_id}/current-token",
+        headers=owner["headers"],
+    ).status_code == 200
+
+    assert client.get(
+        "/sessions/active",
+        headers=other["headers"],
+    ).json() == []
+    assert client.get(
+        f"/sessions/{session_id}",
+        headers=other["headers"],
+    ).status_code == 403
+    assert client.get(
+        f"/sessions/{session_id}/current-token",
+        headers=other["headers"],
+    ).status_code == 403
+    assert client.get(
+        f"/sessions/{session_id}/attendance",
+        headers=other["headers"],
+    ).status_code == 403
+    assert client.post(
+        f"/sessions/{session_id}/close",
+        headers=other["headers"],
+    ).status_code == 403
+    assert client.get(
+        "/attendance/export.csv",
+        params={"session_id": session_id},
+        headers=other["headers"],
+    ).status_code == 403
+
+    assert client.post(
+        f"/sessions/{session_id}/close",
+        headers=owner["headers"],
+    ).status_code == 200
