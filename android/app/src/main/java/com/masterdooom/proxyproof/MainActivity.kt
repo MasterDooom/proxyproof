@@ -182,6 +182,9 @@ private fun ProxyProofRoot() {
     var role by remember { mutableStateOf(prefs.getString("role", "student") ?: "student") }
     var authBusy by remember { mutableStateOf(false) }
     var authMessage by remember { mutableStateOf("") }
+    var connectionBusy by remember { mutableStateOf(false) }
+    var connectionStatus by remember { mutableStateOf("Not tested") }
+    var connectionMessage by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
     if (token.isBlank()) {
@@ -194,6 +197,33 @@ private fun ProxyProofRoot() {
             busy = authBusy,
             message = authMessage,
             onClearMessage = { authMessage = "" },
+            connectionBusy = connectionBusy,
+            connectionStatus = connectionStatus,
+            connectionMessage = connectionMessage,
+            onTestConnection = {
+                scope.launch {
+                    connectionBusy = true
+                    connectionStatus = "Checking…"
+                    connectionMessage = ""
+                    try {
+                        val result = JSONObject(
+                            ApiClient.request(apiBase, "GET", "/health")
+                        )
+                        if (result.optString("status") == "ok") {
+                            connectionStatus = "Healthy"
+                            connectionMessage = "API and configured datastore responded successfully."
+                        } else {
+                            connectionStatus = "Unavailable"
+                            connectionMessage = "The health endpoint returned an unexpected response."
+                        }
+                    } catch (error: Exception) {
+                        connectionStatus = "Unavailable"
+                        connectionMessage = error.message ?: "Could not reach the server."
+                    } finally {
+                        connectionBusy = false
+                    }
+                }
+            },
             onSubmit = { isRegister, user, name, password, selectedRole, inviteCode ->
                 scope.launch {
                     authBusy = true
@@ -290,6 +320,10 @@ private fun LoginScreen(
     busy: Boolean,
     message: String,
     onClearMessage: () -> Unit,
+    connectionBusy: Boolean,
+    connectionStatus: String,
+    connectionMessage: String,
+    onTestConnection: () -> Unit,
     onSubmit: (Boolean, String, String, String, String, String) -> Unit
 ) {
     var isRegister by remember { mutableStateOf(false) }
@@ -361,6 +395,36 @@ private fun LoginScreen(
                 fontSize = 12.sp,
                 lineHeight = 17.sp
             )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onTestConnection,
+                enabled = !connectionBusy && apiBase.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(13.dp)
+            ) {
+                if (connectionBusy) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(if (connectionBusy) "Testing server…" else "Test server connection")
+            }
+            Text(
+                "Connection: $connectionStatus",
+                color = if (connectionStatus == "Healthy") MaterialTheme.colorScheme.primary
+                    else if (connectionStatus == "Unavailable") MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            if (connectionMessage.isNotBlank()) {
+                Text(
+                    connectionMessage,
+                    color = if (connectionStatus == "Unavailable") MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+            }
             Spacer(Modifier.height(18.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
             Spacer(Modifier.height(18.dp))
@@ -555,7 +619,8 @@ private fun DashboardScreen(
     var attendancePercentage by remember { mutableStateOf(0.0) }
     var totalEligible by remember { mutableStateOf(0) }
     var totalPresent by remember { mutableStateOf(0) }
-    var loading by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(true) }
+    var apiConnected by remember { mutableStateOf(false) }
     var busyAction by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var pendingCsvContent by remember { mutableStateOf<String?>(null) }
@@ -634,11 +699,13 @@ private fun DashboardScreen(
                 totalPresent = historyObject.optInt("present_sessions", 0)
             }
             message = "Synced with ProxyProof API."
+            apiConnected = true
         } catch (error: Exception) {
             if (isAuthenticationRejected(error)) {
                 onAuthExpired()
                 return
             }
+            apiConnected = false
             message = error.message ?: "Could not load data from the backend."
         } finally {
             loading = false
@@ -933,7 +1000,10 @@ private fun DashboardScreen(
             )
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                StatusPill(text = if (loading) "SYNCING" else "API CONNECTED", positive = !loading)
+                StatusPill(
+                    text = if (loading) "SYNCING" else if (apiConnected) "API CONNECTED" else "API OFFLINE",
+                    positive = apiConnected && !loading
+                )
                 TextButton(onClick = { scope.launch { loadData() } }, enabled = !loading) {
                     Text(if (loading) "Syncing…" else "Refresh")
                 }
