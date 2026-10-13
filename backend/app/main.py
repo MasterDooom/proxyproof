@@ -111,6 +111,15 @@ def get_session_or_404(session_id: str, db: Session) -> AttendanceSession:
     return item
 
 
+def require_session_owner(item: AttendanceSession, user: User) -> None:
+    """Restrict organiser management to sessions created by that organiser."""
+    if user.role != "organiser" or item.created_by_user_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorised to manage this attendance session.",
+        )
+
+
 def require_room_enrollment(student_id: int, room_id: int, db: Session) -> RoomEnrollment:
     enrollment = db.scalar(
         select(RoomEnrollment).where(
@@ -343,7 +352,7 @@ def my_rooms(
 def create_session(
     payload: SessionCreate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> SessionOut:
     room = db.get(Room, payload.room_id)
     if room is None or not room.is_active:
@@ -360,6 +369,7 @@ def create_session(
 
     item = AttendanceSession(
         room_id=room.id,
+        created_by_user_id=user.id,
         subject_label=payload.subject_label,
         scheduled_start_at=scheduled_aware.replace(tzinfo=None),
         attendance_deadline=deadline_aware.replace(tzinfo=None),
@@ -396,6 +406,8 @@ def list_current_attendance_sessions(
         query = query.join(
             RoomEnrollment, RoomEnrollment.room_id == AttendanceSession.room_id
         ).where(RoomEnrollment.user_id == user.id)
+    elif user.role == "organiser":
+        query = query.where(AttendanceSession.created_by_user_id == user.id)
     items = db.scalars(query).unique().all()
     return [session_to_response(item) for item in items]
 
@@ -404,9 +416,10 @@ def list_current_attendance_sessions(
 def get_current_ble_token(
     session_id: str,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> BleTokenOut:
     item = get_session_or_404(session_id, db)
+    require_session_owner(item, user)
     now = datetime.now(timezone.utc)
     if item.status != "open":
         raise HTTPException(status_code=409, detail="This session is closed.")
@@ -433,9 +446,10 @@ def get_current_ble_token(
 def get_session_attendance(
     session_id: str,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> AttendanceRosterResponse:
     item = get_session_or_404(session_id, db)
+    require_session_owner(item, user)
     enrollments = db.scalars(
         select(RoomEnrollment)
         .where(RoomEnrollment.room_id == item.room_id)
@@ -475,9 +489,10 @@ def manual_attendance(
     session_id: str,
     payload: ManualAttendanceRequest,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> AttendanceRosterItem:
     session = get_session_or_404(session_id, db)
+    require_session_owner(session, user)
     student = db.get(User, payload.student_id)
     if student is None or student.role != "student":
         raise HTTPException(status_code=404, detail="Student not found.")
@@ -644,9 +659,10 @@ def my_attendance(
 def export_attendance_csv(
     session_id: str = Query(min_length=1),
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> Response:
     session = get_session_or_404(session_id, db)
+    require_session_owner(session, user)
     enrollments = db.scalars(
         select(RoomEnrollment).where(RoomEnrollment.room_id == session.room_id)
     ).all()
@@ -696,6 +712,8 @@ def get_session(
     item = get_session_or_404(session_id, db)
     if user.role == "student":
         require_room_enrollment(user.id, item.room_id, db)
+    elif user.role == "organiser":
+        require_session_owner(item, user)
     return session_to_response(item)
 
 
@@ -703,9 +721,10 @@ def get_session(
 def close_session(
     session_id: str,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> SessionOut:
     item = get_session_or_404(session_id, db)
+    require_session_owner(item, user)
     item.status = "closed"
     db.commit()
     db.refresh(item)
