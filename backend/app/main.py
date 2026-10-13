@@ -121,6 +121,8 @@ async def rate_limit_authentication(request: Request, call_next):
             for bucket_key in expired:
                 _rate_limit_state.pop(bucket_key, None)
 
+    return await call_next(request)
+
 
 def as_utc(value: datetime) -> datetime:
     """Interpret SQLite naive timestamps as UTC and return an aware UTC datetime."""
