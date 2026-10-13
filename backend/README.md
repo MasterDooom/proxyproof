@@ -45,7 +45,7 @@ The database URL is normalised from Render's `postgresql://` format to `postgres
 2. Create a room using `POST /rooms`.
 3. Register a student account; use `POST /devices/register` to bind a random app-installation UUID.
 4. Enrol the student with `POST /rooms/{room_id}/enroll`.
-5. Start a session with `POST /sessions` and a timezone-aware `scheduled_start_at`.
+5. Start a session with `POST /sessions` and a timezone-aware `scheduled_start_at`; organisers can review owned active and historical sessions with `GET /sessions/my`.
 6. Organiser polls `GET /sessions/{session_id}/current-token`; the app should broadcast the returned six-byte session tag and 8-byte rotating HMAC token over BLE.
 7. Student BLE scanner submits `POST /attendance/ble` with session tag, current token, and observed RSSI.
 8. The organiser roster is `GET /sessions/{session_id}/attendance`; manual correction is `POST /sessions/{session_id}/attendance/manual`; student history is `GET /attendance/me`; CSV is `GET /attendance/export.csv?session_id=...`.
@@ -60,4 +60,4 @@ The server computes `attendance_deadline = scheduled_start_at + 15 minutes`. For
 
 Render free web services spin down after 15 minutes without traffic and can take around a minute to wake up. Render Free Postgres expires 30 days after creation; upgrade it before expiry to keep data. This setup is a temporary prototype, not production deployment.
 
-The organiser invite code and BLE secret must remain private. Authentication currently uses opaque 24-hour bearer tokens. Per-route rate limiting, account recovery, advanced token revocation management, organiser-approved device replacement, and hardware-backed device attestation are not yet implemented. Versioned Alembic migrations are included. RSSI is client-reported and cannot prove a person is inside a room.
+The organiser invite code and BLE secret must remain private. Authentication uses opaque 24-hour bearer tokens, and `POST /auth/logout` revokes the current token. Per-route rate limiting, account recovery, advanced token revocation management, organiser-approved device replacement, and hardware-backed device attestation are not yet implemented. Versioned Alembic migrations are included. RSSI is client-reported and cannot prove a person is inside a room.
