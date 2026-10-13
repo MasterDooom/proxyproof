@@ -25,7 +25,7 @@ The prototype does not include advertising or analytics SDKs. Do not infer that 
 
 ## Retention and deletion
 
-There is currently no self-service account or attendance-record deletion workflow and no automatic retention/deletion schedule. Records remain in the configured database until an authorised database operator deletes them. Before using ProxyProof with real students, the deployment owner must publish a contact channel, define a retention period, implement and test deletion/export procedures, and explain those procedures to users.
+There is currently no self-service account or attendance-record deletion workflow and no automatic retention/deletion schedule. The current hosted internal-test deployment uses SQLite on Render's temporary filesystem, so accounts and attendance may be lost when the service restarts or redeploys. Do not use it for official records. After replacing DATABASE_URL with the private PostgreSQL Internal Database URL, records remain until an authorised database operator deletes them. Before using ProxyProof with real students, the deployment owner must publish a contact channel, define a retention period, implement and test deletion/export procedures, and explain those procedures to users.
 
 A free Render Postgres instance expires 30 days after creation unless upgraded; that hosting limitation is not a retention strategy or a backup plan. Use an appropriate durable database plan and tested backup/restore procedure before any real deployment.
 
