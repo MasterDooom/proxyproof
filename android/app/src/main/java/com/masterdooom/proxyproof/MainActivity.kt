@@ -100,6 +100,10 @@ private fun requiredBlePermissions(forAdvertising: Boolean = false): Array<Strin
                 Manifest.permission.BLUETOOTH_CONNECT
             )
         }
+    } else if (forAdvertising) {
+        // Legacy Bluetooth permissions are normal install-time permissions.
+        // Location is needed only for BLE scanning on Android 11 and earlier.
+        emptyArray()
     } else {
         arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
     }
