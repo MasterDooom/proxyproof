@@ -1,9 +1,14 @@
 package com.masterdooom.proxyproof
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,6 +42,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,8 +58,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import com.masterdooom.proxyproof.data.ApiClient
+import com.masterdooom.proxyproof.ble.BleAdvertiser
+import com.masterdooom.proxyproof.ble.BleObservation
+import com.masterdooom.proxyproof.ble.BleProtocol
+import com.masterdooom.proxyproof.ble.BleScanner
 import com.masterdooom.proxyproof.ui.theme.ProxyProofTheme
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -64,6 +81,22 @@ import java.util.Locale
 import java.util.UUID
 
 private const val PREFS_NAME = "proxyproof_preferences"
+
+private fun requiredBlePermissions(): Array<String> =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        arrayOf(
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_ADVERTISE,
+            Manifest.permission.BLUETOOTH_CONNECT
+        )
+    } else {
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+
+private fun hasRequiredBlePermissions(context: Context): Boolean =
+    requiredBlePermissions().all {
+        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+    }
 
 private data class RoomItem(
     val id: Int,
@@ -392,6 +425,39 @@ private fun DashboardScreen(
 ) {
     val scope = rememberCoroutineScope()
     val isOrganiser = role == "organiser"
+    val context = LocalContext.current
+    val advertiser = remember(context) { BleAdvertiser(context) }
+    val scanner = remember(context) { BleScanner(context) }
+    var bleMessage by remember { mutableStateOf("BLE attendance is stopped.") }
+    var isBroadcasting by remember { mutableStateOf(false) }
+    var isScanning by remember { mutableStateOf(false) }
+    var selectedBroadcastSessionId by remember { mutableStateOf("") }
+    var pendingBleAction by remember { mutableStateOf("") }
+    var blePermissionsGranted by remember { mutableStateOf(hasRequiredBlePermissions(context)) }
+    val observationsByTag = remember { mutableMapOf<String, MutableList<BleObservation>>() }
+    val successfulTags = remember { mutableSetOf<String>() }
+    val lastAttemptByTag = remember { mutableMapOf<String, Long>() }
+    val blePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        blePermissionsGranted = hasRequiredBlePermissions(context)
+        if (!blePermissionsGranted) {
+            bleMessage = "Nearby-device permission was denied. Allow Bluetooth access in Settings and retry."
+            pendingBleAction = ""
+        } else {
+            when (pendingBleAction) {
+                "scan" -> isScanning = true
+                "advertise" -> isBroadcasting = true
+            }
+            pendingBleAction = ""
+        }
+    }
+    DisposableEffect(advertiser, scanner) {
+        onDispose {
+            advertiser.stop()
+            scanner.stop()
+        }
+    }
     var rooms by remember { mutableStateOf(emptyList<RoomItem>()) }
     var enrolledRoomIds by remember { mutableStateOf(emptySet<Int>()) }
     var sessions by remember { mutableStateOf(emptyList<SessionItem>()) }
@@ -416,7 +482,7 @@ private fun DashboardScreen(
             prefs.edit().putString("device_key", it).apply()
         }
     }
-    var deviceRegistered by remember { mutableStateOf(false) }
+    var deviceRegistered by remember { mutableStateOf(prefs.getBoolean("device_registered", false)) }
 
     suspend fun loadData() {
         loading = true
@@ -469,6 +535,169 @@ private fun DashboardScreen(
 
     LaunchedEffect(apiBase, token, role) {
         loadData()
+    }
+
+    LaunchedEffect(sessions) {
+        if (selectedBroadcastSessionId.isBlank() || sessions.none { it.id == selectedBroadcastSessionId }) {
+            selectedBroadcastSessionId = sessions.firstOrNull()?.id.orEmpty()
+        }
+    }
+
+    LaunchedEffect(isOrganiser, isBroadcasting, selectedBroadcastSessionId, apiBase, token) {
+        if (!isOrganiser || !isBroadcasting || selectedBroadcastSessionId.isBlank()) {
+            advertiser.stop()
+            return@LaunchedEffect
+        }
+        var lastPayload: ByteArray? = null
+        bleMessage = "Connecting to the session token endpoint…"
+        try {
+            while (isActive) {
+                val json = JSONObject(
+                    ApiClient.request(
+                        apiBase,
+                        "GET",
+                        "/sessions/$selectedBroadcastSessionId/current-token",
+                        token
+                    )
+                )
+                val payload = BleProtocol.encode(
+                    json.getString("session_tag"),
+                    json.getString("token")
+                )
+                if (lastPayload == null || !lastPayload!!.contentEquals(payload)) {
+                    advertiser.start(payload) { status ->
+                        scope.launch(Dispatchers.Main.immediate) { bleMessage = status }
+                    }
+                    lastPayload = payload
+                }
+                delay(5_000)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            bleMessage = error.message ?: "Could not start BLE advertising."
+            isBroadcasting = false
+        } finally {
+            advertiser.stop()
+        }
+    }
+
+    LaunchedEffect(isScanning, apiBase, token, deviceRegistered, sessions) {
+        if (!isScanning) {
+            scanner.stop()
+            return@LaunchedEffect
+        }
+        if (!deviceRegistered) {
+            bleMessage = "Register this phone before scanning for attendance."
+            isScanning = false
+            return@LaunchedEffect
+        }
+        if (sessions.isEmpty()) {
+            bleMessage = "There are no eligible active sessions in your enrolled rooms."
+            isScanning = false
+            return@LaunchedEffect
+        }
+        if (!hasRequiredBlePermissions(context)) {
+            bleMessage = "Nearby-device permission is required to scan."
+            isScanning = false
+            return@LaunchedEffect
+        }
+
+        observationsByTag.clear()
+        bleMessage = "Scanning for nearby ProxyProof sessions…"
+        scanner.start(
+            onObservation = { observation ->
+                scope.launch(Dispatchers.Main.immediate) {
+                    if (!isScanning || observation.sessionTag in successfulTags) return@launch
+                    val now = observation.elapsedRealtimeMs
+                    val recent = observationsByTag.getOrPut(observation.sessionTag) { mutableListOf() }
+                    recent.removeAll { now - it.elapsedRealtimeMs > 6_000 }
+                    recent.add(observation)
+                    if (recent.size > 30) recent.removeAt(0)
+
+                    val recentCandidates = observationsByTag.mapNotNull { (tag, values) ->
+                        val window = values.filter { now - it.elapsedRealtimeMs <= 4_000 }
+                        if (window.size < 2) null else {
+                            tag to window
+                        }
+                    }
+                    val stableCandidates = recentCandidates.filter { (_, values) ->
+                        values.size >= 4 &&
+                            values.last().elapsedRealtimeMs - values.first().elapsedRealtimeMs >= 3_000 &&
+                            now - values.last().elapsedRealtimeMs <= 1_500
+                    }
+                    if (stableCandidates.size >= 2) {
+                        val ranked = stableCandidates.map { (tag, values) ->
+                            tag to values.map { it.rssi }.average()
+                        }.sortedByDescending { it.second }
+                        if (kotlin.math.abs(ranked[0].second - ranked[1].second) <= 8.0) {
+                            scanner.stop()
+                            isScanning = false
+                            bleMessage = "Ambiguous room: two sessions have similar signal strength. Move closer to the intended classroom and scan again."
+                            return@launch
+                        }
+                    }
+
+                    val candidate = stableCandidates.maxByOrNull { (_, values) ->
+                        values.map { it.rssi }.average()
+                    } ?: return@launch
+                    val tag = candidate.first
+                    if (tag in successfulTags) return@launch
+                    val lastAttempt = lastAttemptByTag[tag]
+                    if (lastAttempt != null && now - lastAttempt < 10_000) return@launch
+                    lastAttemptByTag[tag] = now
+                    val latest = candidate.second.last()
+                    bleMessage = "Validating presence for a nearby room…"
+                    try {
+                        val result = JSONObject(
+                            ApiClient.request(
+                                apiBase,
+                                "POST",
+                                "/attendance/ble",
+                                token,
+                                JSONObject()
+                                    .put("session_tag", latest.sessionTag)
+                                    .put("token", latest.token)
+                                    .put("rssi", latest.rssi)
+                            )
+                        )
+                        successfulTags.add(tag)
+                        scanner.stop()
+                        isScanning = false
+                        bleMessage = "Attendance confirmed: ${result.optString("subject_label")} · ${result.optString("room_name")}."
+                        loadData()
+                    } catch (error: Exception) {
+                        bleMessage = error.message ?: "Attendance could not be verified by the server."
+                        val text = error.message.orEmpty().lowercase(Locale.getDefault())
+                        if (text.contains("not registered for this room") ||
+                            text.contains("already marked") ||
+                            text.contains("session is closed") ||
+                            text.contains("outside the 15-minute")
+                        ) {
+                            scanner.stop()
+                            isScanning = false
+                        }
+                    }
+                }
+            },
+            onStatus = { status ->
+                scope.launch(Dispatchers.Main.immediate) {
+                    bleMessage = status
+                    if (status.contains("failed", true) ||
+                        status.contains("turned off", true) ||
+                        status.contains("not available", true) ||
+                        status.contains("permission is missing", true)
+                    ) {
+                        isScanning = false
+                    }
+                }
+            }
+        )
+        try {
+            awaitCancellation()
+        } finally {
+            scanner.stop()
+        }
     }
 
     Column(
@@ -747,6 +976,7 @@ private fun DashboardScreen(
                                     JSONObject().put("device_key", deviceKey)
                                 )
                                 deviceRegistered = true
+                                prefs.edit().putBoolean("device_registered", true).apply()
                                 message = "This installation is registered to your account."
                             } catch (error: Exception) {
                                 message = error.message ?: "Device registration failed."
