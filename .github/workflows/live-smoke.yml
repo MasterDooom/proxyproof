@@ -1,0 +1,64 @@
+name: Live deployment smoke test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/live-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wait for deployed health endpoint
+        env:
+          BASE_URL: https://proxyproof-api.onrender.com
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 36); do
+            if curl --connect-timeout 5 --max-time 10 --fail --silent --show-error "$BASE_URL/health" --output /tmp/health.json; then
+              break
+            fi
+            if [ "$attempt" -eq 36 ]; then
+              echo "Health endpoint did not become available."
+              exit 1
+            fi
+            sleep 5
+          done
+          python - <<'PY'
+          import json
+          with open("/tmp/health.json", encoding="utf-8") as handle:
+              response = json.load(handle)
+          assert response.get("status") == "ok", response
+          assert response.get("service") == "proxyproof-api", response
+          print("Live health check passed:", response)
+          PY
+
+      - name: Verify deployed API includes required app endpoints
+        env:
+          BASE_URL: https://proxyproof-api.onrender.com
+        run: |
+          set -euo pipefail
+          curl --connect-timeout 5 --max-time 15 --fail --silent --show-error "$BASE_URL/openapi.json" --output /tmp/openapi.json
+          python - <<'PY'
+          import json
+          with open("/tmp/openapi.json", encoding="utf-8") as handle:
+              spec = json.load(handle)
+          paths = set(spec.get("paths", {}))
+          required = {
+              "/auth/register",
+              "/auth/login",
+              "/auth/logout",
+              "/rooms",
+              "/sessions",
+              "/sessions/my",
+              "/attendance/ble/eligibility",
+              "/attendance/ble",
+              "/attendance/export.csv",
+          }
+          missing = sorted(required - paths)
+          assert not missing, f"Deployed API is missing required endpoints: {missing}"
+          print(f"Live OpenAPI check passed: {len(required)} required endpoints found.")
+          PY
