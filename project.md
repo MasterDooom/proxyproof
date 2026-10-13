@@ -32,10 +32,12 @@ Implemented in the repository:
 Implemented after the backend milestone:
 - Android Jetpack Compose app with login/register, editable API URL, student dashboard, room enrolment, one-installation registration, history/percentage, organiser room creation, session controls, roster, and manual attendance correction.
 - Android debug APK builds in GitHub Actions. Verified successful build on 2026-10-13 (run: https://github.com/MasterDooom/proxyproof/actions/runs/38373408341); artifact name `proxyproof-debug-apk`.
+- Render Blueprint added at repository root to create public HTTPS FastAPI service and PostgreSQL datastore. Deployment is not complete until the owner links the repo to a Render account and fills the organiser invite code.
 - Android target SDK 36 and minimum SDK 26 for a stable prototype build.
 
 Not yet implemented:
 - Android BLE advertising/scanning and real-device discovery/submission.
+- Live hosting still requires the owner-authorised Render Blueprint creation flow. Free Render Postgres expires after 30 days; upgrade before expiry to retain data.
 - A real device-change approval UI/endpoint (mismatched device keys are rejected).
 - Production-grade authentication/authorisation, hardware-backed device attestation or robust inside-room proof.
 
