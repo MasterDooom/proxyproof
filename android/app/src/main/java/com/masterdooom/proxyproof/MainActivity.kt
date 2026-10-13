@@ -576,8 +576,8 @@ private fun DashboardScreen(
                     )
                 )
                 roster = parseRoster(response.optJSONArray("records") ?: JSONArray())
-            } catch (_: CancellationException) {
-                throw
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Exception) {
                 // Preserve the last roster on a transient polling failure; manual refresh remains available.
             }
@@ -885,7 +885,6 @@ private fun DashboardScreen(
                         scope.launch {
                             busyAction = true
                             try {
-                                val start = OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
                                 val body = JSONObject()
                                     .put("room_id", selectedRoomId)
                                     .put("subject_label", subject.trim())
