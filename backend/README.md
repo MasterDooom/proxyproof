@@ -1,15 +1,8 @@
 # ProxyProof API
 
-The backend currently supports authentication, room creation/listing, student room enrollment, one-device registration, scheduled attendance sessions, rotating BLE tokens, attendance validation, manual overrides, history and CSV export.
+FastAPI service with SQLite for local development and Render PostgreSQL for hosted prototypes.
 
-## Requirements
-
-- Python 3.11 or newer
-- Windows PowerShell/CMD, macOS, or Linux
-
-## Run on Windows
-
-From the repository root:
+## Local Windows setup
 
 ```powershell
 cd backend
@@ -19,38 +12,50 @@ py -m venv .venv
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Using `python -m uvicorn` avoids Windows PATH issues with the `uvicorn.exe` launcher.
+Health check: <http://127.0.0.1:8000/health>
 
-Open <http://127.0.0.1:8000/health> for the health check and <http://127.0.0.1:8000/docs> to try the APIs interactively.
+API explorer: <http://127.0.0.1:8000/docs>
 
-Run tests in a second terminal:
+Run tests:
 
 ```powershell
-cd backend
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-## Test workflow
+## Hosted Render setup
 
-1. Register an organiser using `POST /auth/register` with role `organiser` and the local invite code `local-demo-organiser-code`.
-2. Authorize Swagger using the returned bearer token. Use this token to create a room and start a session.
-3. Register a student account. Register the student's app installation key using `POST /devices/register`.
-4. Enrol the student into a room via `POST /rooms/{room_id}/enroll`.
-5. Create a session with an ISO-8601 `scheduled_start_at` including a timezone offset.
-6. The organiser polls `GET /sessions/{session_id}/current-token`; the returned compact tag and token are what the organiser phone advertises over BLE.
-7. The student app sends the observed tag, token and RSSI to `POST /attendance/ble`.
-8. Inspect the organiser roster with `GET /sessions/{session_id}/attendance`, student history with `GET /attendance/me`, or download `GET /attendance/export.csv?session_id={session_id}`.
+The repository root contains `render.yaml`. Use **Render Dashboard → New → Blueprint**, connect `MasterDooom/proxyproof`, and select `main`.
 
-## Attendance deadline
+The Blueprint defines:
+- Free web service in Singapore running Uvicorn on Render's `$PORT`.
+- Free Render Postgres database in Singapore.
+- `DATABASE_URL` bound to the database's private `connectionString`.
+- A generated `PROXYPROOF_TOKEN_SECRET`.
+- A one-time prompted `PROXYPROOF_ORGANISER_INVITE_CODE`; set a private code and keep it to create your organiser account.
 
-The server calculates `attendance_deadline = scheduled_start_at + 15 minutes`. A class scheduled for 08:00 accepts automatic marks until 08:15, regardless of when the organiser opens the app. The server rejects BLE submissions after the deadline. Manual organiser corrections remain available.
+Wait for deployment to finish and test `https://YOUR-SERVICE.onrender.com/health`. The health check executes `SELECT 1` against the configured database. If it fails, check the deploy logs and Render environment settings.
 
-The BLE token rotates every 20 seconds. The server accepts the current and previous slot only to tolerate requests crossing the rotation boundary; it never extends the 15-minute deadline.
+The database URL is normalised from Render's `postgresql://` format to `postgresql+psycopg://`; `psycopg[binary]` is installed from requirements. SQLite remains the default when `DATABASE_URL` is not set.
 
-## Environment variables
+## API happy path
 
-- `PROXYPROOF_TOKEN_SECRET`: long random secret used to compute BLE tokens. The default is for local development only.
-- `PROXYPROOF_ORGANISER_INVITE_CODE`: invite code required to create organiser accounts. The default is for local development only.
-- `PROXYPROOF_MIN_RSSI_DBM`: rough proximity threshold; default `-88` dBm.
+1. Register/log in as an organiser; save its bearer token.
+2. Create a room using `POST /rooms`.
+3. Register a student account; use `POST /devices/register` to bind a random app-installation UUID.
+4. Enrol the student with `POST /rooms/{room_id}/enroll`.
+5. Start a session with `POST /sessions` and a timezone-aware `scheduled_start_at`.
+6. Organiser polls `GET /sessions/{session_id}/current-token`; the app should broadcast the returned six-byte session tag and 8-byte rotating HMAC token over BLE.
+7. Student BLE scanner submits `POST /attendance/ble` with session tag, current token, and observed RSSI.
+8. The organiser roster is `GET /sessions/{session_id}/attendance`; manual correction is `POST /sessions/{session_id}/attendance/manual`; student history is `GET /attendance/me`; CSV is `GET /attendance/export.csv?session_id=...`.
 
-Set environment variables before launching Uvicorn. This API has no deployment-grade secret loading by itself and is not safe to expose publicly as-is.
+The current Android APK does not perform BLE yet, so attendance can currently be tested with the manual organiser controls.
+
+## Attendance cutoff
+
+The server computes `attendance_deadline = scheduled_start_at + 15 minutes`. For an 08:00 class, the deadline is 08:15, regardless of when the organiser opens the session. The class continues; only automatic attendance closes. Manual correction is available afterward.
+
+## Free-tier limitations and security
+
+Render free web services spin down after 15 minutes without traffic and can take around a minute to wake up. Render Free Postgres expires 30 days after creation; upgrade it before expiry to keep data. This setup is a temporary prototype, not production deployment.
+
+The organiser invite code and BLE secret must remain private. Authentication currently uses opaque 24-hour bearer tokens. Rate limiting, admin-controlled class rosters, password reset, refresh/revocation management, full database migrations, and hardware-backed device attestation are not yet implemented. RSSI is client-reported and cannot prove a person is inside a room.
