@@ -6,11 +6,14 @@ a rough proximity heuristic and cannot prove someone is inside a classroom.
 import csv
 import hmac
 import os
+from pathlib import Path
 import time
 from threading import Lock
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import or_, select, text
@@ -73,6 +76,17 @@ app = FastAPI(
     description="Room-specific BLE attendance prototype",
     version="0.2.0",
 )
+
+
+@app.on_event("startup")
+def migrate_hosted_database() -> None:
+    """Apply versioned schema changes before accepting requests on hosted deployments."""
+    if not is_production_environment():
+        return
+    config_path = Path(__file__).resolve().parent.parent / "alembic.ini"
+    alembic_config = AlembicConfig(str(config_path))
+    alembic_command.upgrade(alembic_config, "head")
+
 
 # In-process emergency rate limits for credential endpoints. For multi-instance
 # production deployments, enforce an additional shared/edge limiter as well.
