@@ -5,7 +5,6 @@ a rough proximity heuristic and cannot prove someone is inside a classroom.
 """
 import csv
 import hmac
-import os
 import time
 from datetime import datetime, timedelta, timezone
 from io import StringIO
@@ -51,6 +50,7 @@ from .security import (
     MIN_RSSI_DBM,
     current_ble_slot,
     get_current_user,
+    get_organiser_invite_code,
     hash_password,
     issue_access_token,
     make_ble_token,
@@ -61,9 +61,7 @@ from .security import (
 )
 
 ATTENDANCE_GRACE_MINUTES = 15
-ORGANISER_INVITE_CODE = os.getenv(
-    "PROXYPROOF_ORGANISER_INVITE_CODE", "local-demo-organiser-code"
-)
+ORGANISER_INVITE_CODE = get_organiser_invite_code()
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
