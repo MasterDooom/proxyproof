@@ -102,6 +102,14 @@ private fun hasRequiredBlePermissions(context: Context): Boolean =
         ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
     }
 
+private fun isAuthenticationRejected(error: Throwable): Boolean {
+    val message = error.message.orEmpty()
+    return message.startsWith("HTTP 401:") && (
+        message.contains("access token", ignoreCase = true) ||
+            message.contains("authentication required", ignoreCase = true)
+    )
+}
+
 private data class RoomItem(
     val id: Int,
     val building: String,
@@ -247,10 +255,28 @@ private fun ProxyProofRoot() {
             role = role,
             prefs = prefs,
             onLogout = {
+                val apiUrlToRevoke = apiBase
+                val tokenToRevoke = token
                 secureTokenStore.clear()
                 prefs.edit().remove("access_token").apply()
                 token = ""
                 authMessage = ""
+                scope.launch {
+                    runCatching {
+                        ApiClient.request(
+                            apiUrlToRevoke,
+                            "POST",
+                            "/auth/logout",
+                            tokenToRevoke
+                        )
+                    }
+                }
+            },
+            onAuthExpired = {
+                secureTokenStore.clear()
+                prefs.edit().remove("access_token").apply()
+                token = ""
+                authMessage = "Your sign-in expired. Log in again to continue."
             }
         )
     }
@@ -438,7 +464,8 @@ private fun DashboardScreen(
     displayName: String,
     role: String,
     prefs: android.content.SharedPreferences,
-    onLogout: () -> Unit
+    onLogout: () -> Unit,
+    onAuthExpired: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val isOrganiser = role == "organiser"
@@ -549,6 +576,10 @@ private fun DashboardScreen(
             }
             message = "Synced with ProxyProof API."
         } catch (error: Exception) {
+            if (isAuthenticationRejected(error)) {
+                onAuthExpired()
+                return
+            }
             message = error.message ?: "Could not load data from the backend."
         } finally {
             loading = false
@@ -565,6 +596,10 @@ private fun DashboardScreen(
             selectedRosterSession = sessionId
             message = "Roster updated."
         } catch (error: Exception) {
+            if (isAuthenticationRejected(error)) {
+                onAuthExpired()
+                return
+            }
             message = error.message ?: "Could not load the attendance roster."
         } finally {
             rosterBusy = false
@@ -598,7 +633,11 @@ private fun DashboardScreen(
                 roster = parseRoster(response.optJSONArray("records") ?: JSONArray())
             } catch (cancelled: CancellationException) {
                 throw cancelled
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                if (isAuthenticationRejected(error)) {
+                    onAuthExpired()
+                    return@LaunchedEffect
+                }
                 // Preserve the last roster on a transient polling failure; manual refresh remains available.
             }
         }
@@ -636,6 +675,10 @@ private fun DashboardScreen(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
+            if (isAuthenticationRejected(error)) {
+                onAuthExpired()
+                return@LaunchedEffect
+            }
             bleMessage = error.message ?: "Could not start BLE advertising."
             isBroadcasting = false
         } finally {
@@ -728,6 +771,12 @@ private fun DashboardScreen(
                         bleMessage = "Attendance confirmed: ${result.optString("subject_label")} · ${result.optString("room_name")}."
                         loadData()
                     } catch (error: Exception) {
+                        if (isAuthenticationRejected(error)) {
+                            scanner.stop()
+                            isScanning = false
+                            onAuthExpired()
+                            return@launch
+                        }
                         bleMessage = error.message ?: "Attendance could not be verified by the server."
                         val text = error.message.orEmpty().lowercase(Locale.getDefault())
                         if (text.contains("not registered for this room") ||
