@@ -78,6 +78,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Duration
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -815,10 +816,44 @@ private fun DashboardScreen(
             advertiser.stop()
             return@LaunchedEffect
         }
+        val broadcastSession = sessions.firstOrNull { it.id == selectedBroadcastSessionId }
+        if (broadcastSession == null) {
+            bleMessage = "Selected session is no longer available."
+            isBroadcasting = false
+            advertiser.stop()
+            return@LaunchedEffect
+        }
+        val scheduledStart = runCatching {
+            OffsetDateTime.parse(broadcastSession.scheduledStart)
+        }.getOrNull()
+        val attendanceDeadline = runCatching {
+            OffsetDateTime.parse(broadcastSession.deadline)
+        }.getOrNull()
+        if (scheduledStart == null || attendanceDeadline == null) {
+            bleMessage = "The session schedule could not be read. Refresh and try again."
+            isBroadcasting = false
+            advertiser.stop()
+            return@LaunchedEffect
+        }
+
         var lastPayload: ByteArray? = null
-        bleMessage = "Connecting to the session token endpoint…"
+        bleMessage = "Broadcast armed; waiting for the scheduled class time…"
         try {
             while (isActive) {
+                val now = OffsetDateTime.now()
+                if (now.isBefore(scheduledStart)) {
+                    val remainingSeconds = Duration.between(now, scheduledStart).seconds
+                    val waitSeconds = remainingSeconds.coerceAtLeast(1).coerceAtMost(5)
+                    bleMessage = "Scheduled for ${formatLocalTime(broadcastSession.scheduledStart)}. BLE broadcast will start automatically at class time."
+                    delay(waitSeconds * 1_000)
+                    continue
+                }
+                if (!now.isBefore(attendanceDeadline)) {
+                    advertiser.stop()
+                    bleMessage = "Attendance window closed at ${formatLocalTime(broadcastSession.deadline)}. Broadcast stopped."
+                    isBroadcasting = false
+                    return@LaunchedEffect
+                }
                 val json = JSONObject(
                     ApiClient.request(
                         apiBase,
