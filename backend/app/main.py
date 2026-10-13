@@ -15,7 +15,7 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .database import Base, engine, get_db
+from .database import get_db
 from .models import (
     ApiToken,
     AttendanceRecord,
@@ -63,8 +63,6 @@ from .security import (
 
 ATTENDANCE_GRACE_MINUTES = 15
 ORGANISER_INVITE_CODE = get_organiser_invite_code()
-Base.metadata.create_all(bind=engine)
-
 app = FastAPI(
     title="ProxyProof API",
     description="Room-specific BLE attendance prototype",
