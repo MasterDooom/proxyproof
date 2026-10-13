@@ -587,6 +587,7 @@ private fun DashboardScreen(
     var blePermissionsGranted by remember { mutableStateOf(hasRequiredBlePermissions(context, forAdvertising = isOrganiser)) }
     val observationsByTag = remember { mutableMapOf<String, MutableList<BleObservation>>() }
     val successfulTags = remember { mutableSetOf<String>() }
+    val ineligibleTags = remember { mutableSetOf<String>() }
     val lastAttemptByTag = remember { mutableMapOf<String, Long>() }
     val blePermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -891,7 +892,11 @@ private fun DashboardScreen(
         scanner.start(
             onObservation = { observation ->
                 scope.launch(Dispatchers.Main.immediate) {
-                    if (!isScanning || observation.sessionTag in successfulTags) return@launch
+                    if (
+                        !isScanning ||
+                        observation.sessionTag in successfulTags ||
+                        observation.sessionTag in ineligibleTags
+                    ) return@launch
                     val now = observation.elapsedRealtimeMs
                     val recent = observationsByTag.getOrPut(observation.sessionTag) { mutableListOf() }
                     recent.removeAll { now - it.elapsedRealtimeMs > 6_000 }
@@ -978,13 +983,24 @@ private fun DashboardScreen(
                         }
                         bleMessage = error.message ?: "Attendance could not be verified by the server."
                         val text = error.message.orEmpty().lowercase(Locale.getDefault())
-                        if (text.contains("not registered for this room") ||
-                            text.contains("already marked") ||
+                        if (text.contains("not registered for this room")) {
+                            // A nearby beacon from another classroom must not prevent the
+                            // scanner from finding an enrolled room that is also in range.
+                            ineligibleTags.add(tag)
+                            observationsByTag.remove(tag)
+                            bleMessage = "Nearby session belongs to a room you're not enrolled in. Continuing to search for your registered classroom."
+                        } else if (
                             text.contains("session is closed") ||
-                            text.contains("outside the 15-minute")
+                            text.contains("outside the 15-minute") ||
+                            text.contains("unknown room session advertisement")
                         ) {
+                            ineligibleTags.add(tag)
+                            observationsByTag.remove(tag)
+                            bleMessage = "That nearby session is no longer eligible. Continuing to scan for another open room."
+                        } else if (text.contains("already marked")) {
                             scanner.stop()
                             isScanning = false
+                            bleMessage = "Attendance is already recorded for this session."
                         }
                     }
                 }
@@ -1480,6 +1496,7 @@ private fun DashboardScreen(
                             observationsByTag.clear()
                             successfulTags.clear()
                             lastAttemptByTag.clear()
+                            ineligibleTags.clear()
                             isScanning = true
                         }
                     },
