@@ -67,6 +67,9 @@ class Room(Base):
     room_code: Mapped[str] = mapped_column(String(40), nullable=False)
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive, nullable=False)
 
     sessions: Mapped[list["AttendanceSession"]] = relationship(back_populates="room")
