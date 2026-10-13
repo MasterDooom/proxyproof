@@ -470,6 +470,21 @@ def create_session(
     return session_to_response(item)
 
 
+@app.get("/sessions/my", response_model=list[SessionOut])
+def organiser_session_history(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role("organiser")),
+) -> list[SessionOut]:
+    """Return recent and historical sessions owned by this organiser."""
+    items = db.scalars(
+        select(AttendanceSession)
+        .where(AttendanceSession.created_by_user_id == user.id)
+        .order_by(AttendanceSession.scheduled_start_at.desc())
+        .limit(200)
+    ).all()
+    return [session_to_response(item) for item in items]
+
+
 @app.get("/sessions/active", response_model=list[SessionOut])
 def list_current_attendance_sessions(
     db: Session = Depends(get_db),
