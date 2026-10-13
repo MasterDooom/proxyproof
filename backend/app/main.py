@@ -357,7 +357,7 @@ def create_session(
     room = db.get(Room, payload.room_id)
     if room is None or not room.is_active:
         raise HTTPException(status_code=404, detail="Active room not found.")
-    if room.created_by_user_id is not None and room.created_by_user_id != _user.id:
+    if room.created_by_user_id is not None and room.created_by_user_id != user.id:
         raise HTTPException(
             status_code=403,
             detail="You are not authorised to create sessions for this room.",
