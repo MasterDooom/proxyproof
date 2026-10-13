@@ -525,6 +525,32 @@ private fun DashboardScreen(
     var loading by remember { mutableStateOf(false) }
     var busyAction by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
+    var pendingCsvContent by remember { mutableStateOf<String?>(null) }
+    var pendingCsvFilename by remember { mutableStateOf("proxyproof-attendance.csv") }
+    val csvDocumentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        val csv = pendingCsvContent
+        if (uri == null || csv == null) {
+            message = "CSV export cancelled."
+        } else {
+            scope.launch(Dispatchers.IO) {
+                val result = runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use { output ->
+                        output.write(csv.toByteArray(Charsets.UTF_8))
+                    } ?: error("Could not open the selected document.")
+                }
+                scope.launch(Dispatchers.Main.immediate) {
+                    message = if (result.isSuccess) {
+                        "Attendance CSV saved."
+                    } else {
+                        result.exceptionOrNull()?.message ?: "Could not save the CSV."
+                    }
+                    pendingCsvContent = null
+                }
+            }
+        }
+    }
     var building by remember { mutableStateOf("AB1") }
     var roomCode by remember { mutableStateOf("") }
     var roomName by remember { mutableStateOf("") }
@@ -583,6 +609,27 @@ private fun DashboardScreen(
             message = error.message ?: "Could not load data from the backend."
         } finally {
             loading = false
+        }
+    }
+
+    suspend fun prepareCsvExport(sessionId: String) {
+        try {
+            val csv = ApiClient.request(
+                apiBase,
+                "GET",
+                "/attendance/export.csv?session_id=$sessionId",
+                token
+            )
+            pendingCsvContent = csv
+            pendingCsvFilename = "proxyproof-attendance-${sessionId.take(8)}.csv"
+            csvDocumentLauncher.launch(pendingCsvFilename)
+            message = "Choose where to save the attendance CSV."
+        } catch (error: Exception) {
+            if (isAuthenticationRejected(error)) {
+                onAuthExpired()
+                return
+            }
+            message = error.message ?: "Could not export attendance."
         }
     }
 
@@ -1089,6 +1136,17 @@ private fun DashboardScreen(
             if (selectedRosterSession.isNotBlank()) {
                 PPPanel {
                     SectionHeading("ATTENDANCE ROSTER", "Manual changes are labelled and recorded separately from BLE.")
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch { prepareCsvExport(selectedRosterSession) }
+                        },
+                        enabled = selectedRosterSession.isNotBlank() && !rosterBusy,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(13.dp)
+                    ) {
+                        Text("Export this session as CSV")
+                    }
                     Spacer(Modifier.height(8.dp))
                     if (rosterBusy) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
