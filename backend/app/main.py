@@ -78,7 +78,7 @@ app = FastAPI(
 # production deployments, enforce an additional shared/edge limiter as well.
 _RATE_LIMITS = {
     "/auth/login": (10, 60),
-    "/auth/register": (5, 3600),
+    "/auth/register": (20, 60),
     "/attendance/ble/eligibility": (30, 60),
     "/attendance/ble": (30, 60),
 }
