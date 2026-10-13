@@ -55,6 +55,7 @@ from .security import (
     current_ble_slot,
     get_current_user,
     get_organiser_invite_code,
+    hash_access_token,
     hash_password,
     issue_access_token,
     make_ble_token,
@@ -274,6 +275,23 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> AuthResponse:
 @app.get("/auth/me", response_model=UserOut)
 def auth_me(user: User = Depends(get_current_user)) -> UserOut:
     return user_to_response(user)
+
+
+@app.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """Revoke the current opaque bearer token."""
+    parts = request.headers.get("Authorization", "").split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    token_row = db.get(ApiToken, hash_access_token(parts[1]))
+    if token_row is not None and token_row.user_id == user.id:
+        db.delete(token_row)
+        db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/devices/register", response_model=DeviceOut, status_code=status.HTTP_201_CREATED)
