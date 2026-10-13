@@ -7,14 +7,17 @@ import csv
 import hmac
 import os
 import time
+from threading import Lock
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .config import is_production_environment
 from .database import get_db
 from .models import (
     ApiToken,
@@ -68,6 +71,54 @@ app = FastAPI(
     description="Room-specific BLE attendance prototype",
     version="0.2.0",
 )
+
+# In-process emergency rate limits for credential endpoints. For multi-instance
+# production deployments, enforce an additional shared/edge limiter as well.
+_RATE_LIMITS = {
+    "/auth/login": (10, 60),
+    "/auth/register": (5, 3600),
+}
+_rate_limit_state: dict[tuple[str, str], tuple[float, int]] = {}
+_rate_limit_lock = Lock()
+_rate_limit_requests = 0
+
+
+@app.middleware("http")
+async def rate_limit_authentication(request: Request, call_next):
+    global _rate_limit_requests
+    rule = _RATE_LIMITS.get(request.url.path)
+    if (
+        rule is None
+        or request.method != "POST"
+        or not is_production_environment()
+    ):
+        return await call_next(request)
+
+    limit, window_seconds = rule
+    client_ip = request.client.host if request.client else "unknown"
+    key = (request.url.path, client_ip)
+    now = time.monotonic()
+    with _rate_limit_lock:
+        start, count = _rate_limit_state.get(key, (now, 0))
+        if now - start >= window_seconds:
+            start, count = now, 0
+        if count >= limit:
+            retry_after = max(1, int(window_seconds - (now - start)))
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Wait before trying again."},
+                headers={"Retry-After": str(retry_after)},
+            )
+        _rate_limit_state[key] = (start, count + 1)
+        _rate_limit_requests += 1
+        if _rate_limit_requests % 256 == 0 and len(_rate_limit_state) > 4096:
+            expired = [
+                bucket_key
+                for bucket_key, (bucket_start, _) in _rate_limit_state.items()
+                if now - bucket_start > 3600
+            ]
+            for bucket_key in expired:
+                _rate_limit_state.pop(bucket_key, None)
 
 
 def as_utc(value: datetime) -> datetime:
