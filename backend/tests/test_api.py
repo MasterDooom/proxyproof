@@ -119,7 +119,11 @@ def get_ble_advertisement(client: TestClient, organiser: dict, session_id: str):
 def test_health(client: TestClient):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "proxyproof-api"}
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "proxyproof-api"
+    assert body["storage_backend"] in {"sqlite", "postgresql"}
+    assert "storage_warning" in body
 
 
 def test_room_endpoints_require_authentication(client: TestClient):
