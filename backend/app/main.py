@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -148,7 +148,9 @@ def root() -> dict[str, str]:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health(db: Session = Depends(get_db)) -> dict[str, str]:
+    # Include a cheap datastore check so the host can detect DB outages too.
+    db.execute(text("SELECT 1"))
     return {"status": "ok", "service": "proxyproof-api"}
 
 
