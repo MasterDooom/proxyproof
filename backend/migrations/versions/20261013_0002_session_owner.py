@@ -23,7 +23,7 @@ def upgrade() -> None:
                 sa.Column(
                     "created_by_user_id",
                     sa.Integer(),
-                    sa.ForeignKey("users.id"),
+                    sa.ForeignKey("users.id", name="fk_attendance_sessions_created_by_user_id_users"),
                     nullable=True,
                 )
             )
