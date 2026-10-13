@@ -29,9 +29,13 @@ Implemented in the repository:
 - Manual organiser corrections, student attendance history/percentage, organiser roster and session CSV export.
 - API tests and GitHub Actions workflow; 13 tests passed in CI on 2026-10-13 (run: https://github.com/MasterDooom/proxyproof/actions/runs/38371533680).
 
+Implemented after the backend milestone:
+- Android Jetpack Compose app with login/register, editable API URL, student dashboard, room enrolment, one-installation registration, history/percentage, organiser room creation, session controls, roster, and manual attendance correction.
+- Android debug APK builds in GitHub Actions. Verified successful build on 2026-10-13 (run: https://github.com/MasterDooom/proxyproof/actions/runs/38373408341); artifact name `proxyproof-debug-apk`.
+- Android target SDK 36 and minimum SDK 26 for a stable prototype build.
+
 Not yet implemented:
-- Android UI connected to the backend.
-- BLE advertising/scanning on real Android devices.
+- Android BLE advertising/scanning and real-device discovery/submission.
 - A real device-change approval UI/endpoint (mismatched device keys are rejected).
 - Production-grade authentication/authorisation, hardware-backed device attestation or robust inside-room proof.
 
