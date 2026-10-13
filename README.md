@@ -17,17 +17,18 @@ ProxyProof is an Android-first prototype for room-specific BLE-assisted attendan
 
 ## Deploy the backend (Render)
 
-The repository includes [render.yaml](render.yaml), which defines a public HTTPS FastAPI service and PostgreSQL datastore through a Render Blueprint. The current existing Render web service was created separately; its `DATABASE_URL` must be added in the dashboard before this hardened branch can be deployed.
+The API is deployed at [https://proxyproof-api.onrender.com](https://proxyproof-api.onrender.com). The current hosted instance is configured with `DATABASE_URL=sqlite:///./proxyproof.db` as a temporary internal-test datastore because the private Render PostgreSQL connection URL was not available to the deployment integration. **SQLite on Render's temporary filesystem is not durable. Accounts, enrolments, sessions, and attendance may be lost on restart or redeploy. Do not use this configuration for official attendance records.** The login screen's connection test and `/health` response disclose this warning.
 
-1. Open the existing service at [Render Dashboard](https://dashboard.render.com/web/srv-db6vnvcs728c73cv8ihg) and the database at [proxyproof-postgres](https://dashboard.render.com/d/dpg-db6vnfek1f9s73bo4f8g-a).
+### Switch the hosted demo to durable PostgreSQL
+
+1. Open the existing service at [Render Dashboard](https://dashboard.render.com/web/srv-db6vnvcs728c73cv8ihg) and the provisioned database at [proxyproof-postgres](https://dashboard.render.com/d/dpg-db6vnfek1f9s73bo4f8g-a).
 2. In the PostgreSQL page, open **Connect** and copy the **Internal Database URL**. Do not expose it in GitHub, screenshots, or chat.
-3. In the web service's **Environment** settings, set `DATABASE_URL` to that internal URL. Keep the existing `PROXYPROOF_TOKEN_SECRET` and `PROXYPROOF_ORGANISER_INVITE_CODE` private and strong.
-4. Update the service start command to `cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT`; keep its build command `cd backend && pip install -r requirements.txt`.
-5. Only deploy this hardened branch after its checks pass and the environment variables above are configured. The application now refuses to start in Render without a database URL rather than silently using ephemeral SQLite.
-6. Test the public `/health` endpoint after deployment. It executes `SELECT 1` against the configured database and should return `{"status":"ok","service":"proxyproof-api"}`.
-7. Open `/docs` to inspect the API. For a completely new Render environment, use **New Blueprint** and follow `render.yaml` instead of manually creating duplicate resources.
+3. In the web service's **Environment** settings, replace `DATABASE_URL` with that internal URL. Keep `PROXYPROOF_TOKEN_SECRET` and `PROXYPROOF_ORGANISER_INVITE_CODE` private and strong.
+4. The current app applies Alembic migrations on hosted startup. The Blueprint's start command also applies migrations before Uvicorn, which is safe because the migrations are versioned.
+5. After the restart, check `/health` shows `storage_backend: "postgresql"` and an empty `storage_warning`. Then run create/read and restart-persistence tests before storing real attendance records.
+6. Open `/docs` to inspect the API. For a brand-new environment, use **New Blueprint** and follow `render.yaml` instead of manually creating duplicate resources.
 
-The intended API/database region is Singapore. The app normalises Render's PostgreSQL URL to the psycopg 3 driver. The hosted database connection is not considered verified until `/health`, a create/read smoke test, and a restart persistence test all pass.
+The intended API/database region is Singapore. The app normalises Render's PostgreSQL URL to the psycopg 3 driver. The current service is healthy, but durable Postgres connectivity has not been verified until the change above and its persistence checks pass.
 
 ### Important free-tier limits
 
