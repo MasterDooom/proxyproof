@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import is_production_environment
-from .database import get_db
+from .database import DATABASE_URL, get_db
 from .models import (
     ApiToken,
     AttendanceRecord,
@@ -235,7 +235,19 @@ def root() -> dict[str, str]:
 def health(db: Session = Depends(get_db)) -> dict[str, str]:
     # Include a cheap datastore check so the host can detect DB outages too.
     db.execute(text("SELECT 1"))
-    return {"status": "ok", "service": "proxyproof-api"}
+    using_sqlite = DATABASE_URL.startswith("sqlite")
+    storage_warning = ""
+    if using_sqlite and is_production_environment():
+        storage_warning = (
+            "This hosted demo uses temporary SQLite storage; accounts and attendance "
+            "may be lost when the service restarts or redeploys. Do not use for official records."
+        )
+    return {
+        "status": "ok",
+        "service": "proxyproof-api",
+        "storage_backend": "sqlite" if using_sqlite else "postgresql",
+        "storage_warning": storage_warning,
+    }
 
 
 @app.post("/auth/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
