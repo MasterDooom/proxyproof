@@ -16,6 +16,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from .config import required_secret
 from .database import get_db
 from .models import ApiToken, User
 
@@ -110,11 +111,21 @@ def require_role(*allowed_roles: str) -> Callable:
 
 
 def _attendance_secret() -> bytes:
-    secret = os.getenv(
+    """Load the BLE HMAC secret, failing closed in hosted deployments."""
+    return required_secret(
         "PROXYPROOF_TOKEN_SECRET",
-        "local-development-secret-change-before-deployment",
+        minimum_length=32,
+        development_default="local-development-secret-change-before-deployment",
+    ).encode("utf-8")
+
+
+def get_organiser_invite_code() -> str:
+    """Read the organiser invite code without a production fallback."""
+    return required_secret(
+        "PROXYPROOF_ORGANISER_INVITE_CODE",
+        minimum_length=16,
+        development_default="local-demo-organiser-code",
     )
-    return secret.encode("utf-8")
 
 
 def current_ble_slot(now_epoch: float | None = None) -> int:

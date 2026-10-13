@@ -1,9 +1,14 @@
 package com.masterdooom.proxyproof
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +26,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -37,6 +43,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,11 +59,26 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.core.content.ContextCompat
 import com.masterdooom.proxyproof.data.ApiClient
+import com.masterdooom.proxyproof.ble.BleAdvertiser
+import com.masterdooom.proxyproof.ble.BleObservation
+import com.masterdooom.proxyproof.ble.BleProtocol
+import com.masterdooom.proxyproof.ble.BleScanner
+import com.masterdooom.proxyproof.security.SecureTokenStore
 import com.masterdooom.proxyproof.ui.theme.ProxyProofTheme
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Duration
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -64,7 +86,43 @@ import java.util.Locale
 import java.util.UUID
 
 private const val PREFS_NAME = "proxyproof_preferences"
-private const val DEFAULT_API_URL = "http://10.0.2.2:8000"
+
+private fun requiredBlePermissions(forAdvertising: Boolean = false): Array<String> =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        if (forAdvertising) {
+            arrayOf(
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.BLUETOOTH_CONNECT
+            )
+        } else {
+            arrayOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT
+            )
+        }
+    } else if (forAdvertising) {
+        // Legacy Bluetooth permissions are normal install-time permissions.
+        // Location is needed only for BLE scanning on Android 11 and earlier.
+        emptyArray()
+    } else {
+        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+
+private fun hasRequiredBlePermissions(
+    context: Context,
+    forAdvertising: Boolean = false
+): Boolean =
+    requiredBlePermissions(forAdvertising).all {
+        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+    }
+
+private fun isAuthenticationRejected(error: Throwable): Boolean {
+    val message = error.message.orEmpty()
+    return message.startsWith("HTTP 401:") && (
+        message.contains("access token", ignoreCase = true) ||
+            message.contains("authentication required", ignoreCase = true)
+    )
+}
 
 private data class RoomItem(
     val id: Int,
@@ -117,15 +175,29 @@ class MainActivity : ComponentActivity() {
 private fun ProxyProofRoot() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
+    val secureTokenStore = remember(context) { SecureTokenStore(context) }
+    val legacyToken = remember { prefs.getString("access_token", null) }
+    val defaultApiUrl = remember { context.getString(R.string.default_api_url) }
     var apiBase by remember {
-        mutableStateOf(prefs.getString("api_base", DEFAULT_API_URL) ?: DEFAULT_API_URL)
+        mutableStateOf(prefs.getString("api_base", defaultApiUrl) ?: defaultApiUrl)
     }
-    var token by remember { mutableStateOf(prefs.getString("access_token", "") ?: "") }
+    var token by remember { mutableStateOf(secureTokenStore.read() ?: legacyToken.orEmpty()) }
+    LaunchedEffect(secureTokenStore) {
+        // Migrate an older plaintext token once, then remove the old preference.
+        if (secureTokenStore.read().isNullOrBlank() && !legacyToken.isNullOrBlank()) {
+            val migrated = runCatching { secureTokenStore.write(legacyToken) }.isSuccess
+            prefs.edit().remove("access_token").apply()
+            if (!migrated) token = ""
+        }
+    }
     var username by remember { mutableStateOf(prefs.getString("username", "") ?: "") }
     var displayName by remember { mutableStateOf(prefs.getString("display_name", "") ?: "") }
     var role by remember { mutableStateOf(prefs.getString("role", "student") ?: "student") }
     var authBusy by remember { mutableStateOf(false) }
     var authMessage by remember { mutableStateOf("") }
+    var connectionBusy by remember { mutableStateOf(false) }
+    var connectionStatus by remember { mutableStateOf("Not tested") }
+    var connectionMessage by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
 
     if (token.isBlank()) {
@@ -138,6 +210,33 @@ private fun ProxyProofRoot() {
             busy = authBusy,
             message = authMessage,
             onClearMessage = { authMessage = "" },
+            connectionBusy = connectionBusy,
+            connectionStatus = connectionStatus,
+            connectionMessage = connectionMessage,
+            onTestConnection = {
+                scope.launch {
+                    connectionBusy = true
+                    connectionStatus = "Checking…"
+                    connectionMessage = ""
+                    try {
+                        val result = JSONObject(
+                            ApiClient.request(apiBase, "GET", "/health")
+                        )
+                        if (result.optString("status") == "ok") {
+                            connectionStatus = "Healthy"
+                            connectionMessage = "API and configured datastore responded successfully."
+                        } else {
+                            connectionStatus = "Unavailable"
+                            connectionMessage = "The health endpoint returned an unexpected response."
+                        }
+                    } catch (error: Exception) {
+                        connectionStatus = "Unavailable"
+                        connectionMessage = error.message ?: "Could not reach the server."
+                    } finally {
+                        connectionBusy = false
+                    }
+                }
+            },
             onSubmit = { isRegister, user, name, password, selectedRole, inviteCode ->
                 scope.launch {
                     authBusy = true
@@ -169,12 +268,14 @@ private fun ProxyProofRoot() {
                             )
                         )
                         val userData = response.getJSONObject("user")
-                        token = response.getString("access_token")
+                        val issuedToken = response.getString("access_token")
+                        secureTokenStore.write(issuedToken)
+                        token = issuedToken
                         username = userData.optString("username", user.trim())
                         displayName = userData.optString("display_name", username)
                         role = userData.optString("role", "student")
                         prefs.edit()
-                            .putString("access_token", token)
+                            .remove("access_token")
                             .putString("username", username)
                             .putString("display_name", displayName)
                             .putString("role", role)
@@ -198,9 +299,28 @@ private fun ProxyProofRoot() {
             role = role,
             prefs = prefs,
             onLogout = {
+                val apiUrlToRevoke = apiBase
+                val tokenToRevoke = token
+                secureTokenStore.clear()
                 prefs.edit().remove("access_token").apply()
                 token = ""
                 authMessage = ""
+                scope.launch {
+                    runCatching {
+                        ApiClient.request(
+                            apiUrlToRevoke,
+                            "POST",
+                            "/auth/logout",
+                            tokenToRevoke
+                        )
+                    }
+                }
+            },
+            onAuthExpired = {
+                secureTokenStore.clear()
+                prefs.edit().remove("access_token").apply()
+                token = ""
+                authMessage = "Your sign-in expired. Log in again to continue."
             }
         )
     }
@@ -213,6 +333,10 @@ private fun LoginScreen(
     busy: Boolean,
     message: String,
     onClearMessage: () -> Unit,
+    connectionBusy: Boolean,
+    connectionStatus: String,
+    connectionMessage: String,
+    onTestConnection: () -> Unit,
     onSubmit: (Boolean, String, String, String, String, String) -> Unit
 ) {
     var isRegister by remember { mutableStateOf(false) }
@@ -275,11 +399,45 @@ private fun LoginScreen(
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                "Emulator default: 10.0.2.2. On your phone, enter your laptop's Wi-Fi IPv4 address. Keep the backend running.",
+                if (apiBase.startsWith("https://")) {
+                    "Hosted HTTPS works over Wi-Fi or mobile data. Use a local URL only for development."
+                } else {
+                    "Local development only: emulator uses 10.0.2.2; a physical phone needs your computer's LAN IP and the local backend running."
+                },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
                 lineHeight = 17.sp
             )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onTestConnection,
+                enabled = !connectionBusy && apiBase.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(13.dp)
+            ) {
+                if (connectionBusy) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(if (connectionBusy) "Testing server…" else "Test server connection")
+            }
+            Text(
+                "Connection: $connectionStatus",
+                color = if (connectionStatus == "Healthy") MaterialTheme.colorScheme.primary
+                    else if (connectionStatus == "Unavailable") MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            if (connectionMessage.isNotBlank()) {
+                Text(
+                    connectionMessage,
+                    color = if (connectionStatus == "Unavailable") MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+            }
             Spacer(Modifier.height(18.dp))
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
             Spacer(Modifier.height(18.dp))
@@ -372,10 +530,38 @@ private fun LoginScreen(
         }
         Spacer(Modifier.height(18.dp))
         Text(
-            "Prototype build · BLE attendance is the next integration stage",
+            "Internal testing · foreground BLE requires nearby-device permission and compatible hardware",
             modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 11.sp
+        )
+        PrivacyNoticeLink()
+    }
+}
+
+@Composable
+private fun PrivacyNoticeLink() {
+    var visible by remember { mutableStateOf(false) }
+    TextButton(
+        onClick = { visible = true },
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text("Privacy & prototype limitations")
+    }
+    if (visible) {
+        AlertDialog(
+            onDismissRequest = { visible = false },
+            title = { Text("Privacy & limitations") },
+            text = {
+                Text(
+                    "ProxyProof stores your username, display name, app-installation ID, room enrolments, and attendance status/time/method. For successful BLE attendance, the server also stores the signal strength reported by the phone. Passwords are hashed on the server; this app encrypts its saved access token with Android Keystore.\n\n" +
+                        "Organisers can view rosters and export records for sessions they own. The app does not collect GPS coordinates. Android 8–11 may require location permission for BLE scanning, but that permission is requested to satisfy Android's BLE requirements.\n\n" +
+                        "Records remain until a database operator deletes them; self-service account deletion is not implemented. BLE signal strength cannot prove with certainty that you are inside a classroom. This is a foreground-only internal testing build."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { visible = false }) { Text("Close") }
+            }
         )
     }
 }
@@ -388,26 +574,112 @@ private fun DashboardScreen(
     displayName: String,
     role: String,
     prefs: android.content.SharedPreferences,
-    onLogout: () -> Unit
+    onLogout: () -> Unit,
+    onAuthExpired: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val isOrganiser = role == "organiser"
+    val context = LocalContext.current
+    val lifecycleOwner = context as? LifecycleOwner
+    val advertiser = remember(context) { BleAdvertiser(context) }
+    val scanner = remember(context) { BleScanner(context) }
+    var bleMessage by remember { mutableStateOf("BLE attendance is stopped.") }
+    var isBroadcasting by remember { mutableStateOf(false) }
+    var isScanning by remember { mutableStateOf(false) }
+    var selectedBroadcastSessionId by remember { mutableStateOf("") }
+    var pendingBleAction by remember { mutableStateOf("") }
+    var blePermissionsGranted by remember { mutableStateOf(hasRequiredBlePermissions(context, forAdvertising = isOrganiser)) }
+    val observationsByTag = remember { mutableMapOf<String, MutableList<BleObservation>>() }
+    val successfulTags = remember { mutableSetOf<String>() }
+    val ineligibleTags = remember { mutableSetOf<String>() }
+    val lastAttemptByTag = remember { mutableMapOf<String, Long>() }
+    val blePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        blePermissionsGranted = hasRequiredBlePermissions(context, forAdvertising = isOrganiser)
+        if (!blePermissionsGranted) {
+            bleMessage = "Nearby-device permission was denied. Allow Bluetooth access in Settings and retry."
+            pendingBleAction = ""
+        } else {
+            when (pendingBleAction) {
+                "scan" -> isScanning = true
+                "advertise" -> isBroadcasting = true
+            }
+            pendingBleAction = ""
+        }
+    }
+    DisposableEffect(lifecycleOwner, advertiser, scanner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) {
+                blePermissionsGranted = hasRequiredBlePermissions(
+                    context,
+                    forAdvertising = isOrganiser
+                )
+            }
+            if (event == Lifecycle.Event.ON_STOP) {
+                // Keep BLE foreground-only; background attendance is not promised.
+                advertiser.stop()
+                scanner.stop()
+                isBroadcasting = false
+                isScanning = false
+                bleMessage = "BLE paused when ProxyProof left the foreground. Return and start it again when ready."
+            }
+        }
+        lifecycleOwner?.lifecycle?.addObserver(observer)
+        onDispose {
+            lifecycleOwner?.lifecycle?.removeObserver(observer)
+            advertiser.stop()
+            scanner.stop()
+        }
+    }
     var rooms by remember { mutableStateOf(emptyList<RoomItem>()) }
     var enrolledRoomIds by remember { mutableStateOf(emptySet<Int>()) }
     var sessions by remember { mutableStateOf(emptyList<SessionItem>()) }
+    var sessionHistory by remember { mutableStateOf(emptyList<SessionItem>()) }
     var history by remember { mutableStateOf(emptyList<HistoryItem>()) }
     var attendancePercentage by remember { mutableStateOf(0.0) }
     var totalEligible by remember { mutableStateOf(0) }
     var totalPresent by remember { mutableStateOf(0) }
-    var loading by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(true) }
+    var apiConnected by remember { mutableStateOf(false) }
     var busyAction by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
+    var pendingCsvContent by remember { mutableStateOf<String?>(null) }
+    var pendingCsvFilename by remember { mutableStateOf("proxyproof-attendance.csv") }
+    val csvDocumentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        val csv = pendingCsvContent
+        if (uri == null || csv == null) {
+            message = "CSV export cancelled."
+        } else {
+            scope.launch(Dispatchers.IO) {
+                val result = runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use { output ->
+                        output.write(csv.toByteArray(Charsets.UTF_8))
+                    } ?: error("Could not open the selected document.")
+                }
+                scope.launch(Dispatchers.Main.immediate) {
+                    message = if (result.isSuccess) {
+                        "Attendance CSV saved."
+                    } else {
+                        result.exceptionOrNull()?.message ?: "Could not save the CSV."
+                    }
+                    pendingCsvContent = null
+                }
+            }
+        }
+    }
     var building by remember { mutableStateOf("AB1") }
     var roomCode by remember { mutableStateOf("") }
     var roomName by remember { mutableStateOf("") }
     var subject by remember { mutableStateOf("Engineering Mathematics") }
+    var scheduledStartText by remember {
+        mutableStateOf(OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME))
+    }
     var selectedRoomId by remember { mutableStateOf(0) }
     var roomMenuExpanded by remember { mutableStateOf(false) }
+    var broadcastMenuExpanded by remember { mutableStateOf(false) }
     var selectedRosterSession by remember { mutableStateOf("") }
     var roster by remember { mutableStateOf(emptyList<RosterItem>()) }
     var rosterBusy by remember { mutableStateOf(false) }
@@ -416,7 +688,11 @@ private fun DashboardScreen(
             prefs.edit().putString("device_key", it).apply()
         }
     }
-    var deviceRegistered by remember { mutableStateOf(false) }
+    var deviceRegistered by remember(username) {
+        mutableStateOf(
+            prefs.getString("device_registered_username", null) == username
+        )
+    }
 
     suspend fun loadData() {
         loading = true
@@ -427,11 +703,15 @@ private fun DashboardScreen(
             }
             if (isOrganiser) {
                 enrolledRoomIds = emptySet()
+                sessionHistory = parseSessions(
+                    JSONArray(ApiClient.request(apiBase, "GET", "/sessions/my", token))
+                )
                 history = emptyList()
                 attendancePercentage = 0.0
                 totalEligible = 0
                 totalPresent = 0
             } else {
+                sessionHistory = emptyList()
                 enrolledRoomIds = parseRooms(JSONArray(ApiClient.request(apiBase, "GET", "/rooms/my", token)))
                     .map { it.id }.toSet()
             }
@@ -444,10 +724,37 @@ private fun DashboardScreen(
                 totalPresent = historyObject.optInt("present_sessions", 0)
             }
             message = "Synced with ProxyProof API."
+            apiConnected = true
         } catch (error: Exception) {
+            if (isAuthenticationRejected(error)) {
+                onAuthExpired()
+                return
+            }
+            apiConnected = false
             message = error.message ?: "Could not load data from the backend."
         } finally {
             loading = false
+        }
+    }
+
+    suspend fun prepareCsvExport(sessionId: String) {
+        try {
+            val csv = ApiClient.request(
+                apiBase,
+                "GET",
+                "/attendance/export.csv?session_id=$sessionId",
+                token
+            )
+            pendingCsvContent = csv
+            pendingCsvFilename = "proxyproof-attendance-${sessionId.take(8)}.csv"
+            csvDocumentLauncher.launch(pendingCsvFilename)
+            message = "Choose where to save the attendance CSV."
+        } catch (error: Exception) {
+            if (isAuthenticationRejected(error)) {
+                onAuthExpired()
+                return
+            }
+            message = error.message ?: "Could not export attendance."
         }
     }
 
@@ -461,6 +768,10 @@ private fun DashboardScreen(
             selectedRosterSession = sessionId
             message = "Roster updated."
         } catch (error: Exception) {
+            if (isAuthenticationRejected(error)) {
+                onAuthExpired()
+                return
+            }
             message = error.message ?: "Could not load the attendance roster."
         } finally {
             rosterBusy = false
@@ -469,6 +780,293 @@ private fun DashboardScreen(
 
     LaunchedEffect(apiBase, token, role) {
         loadData()
+    }
+
+    LaunchedEffect(sessions) {
+        if (selectedBroadcastSessionId.isBlank() || sessions.none { it.id == selectedBroadcastSessionId }) {
+            isBroadcasting = false
+            selectedBroadcastSessionId = sessions.firstOrNull()?.id.orEmpty()
+        }
+    }
+
+    LaunchedEffect(isOrganiser, selectedRosterSession, apiBase, token) {
+        if (!isOrganiser || selectedRosterSession.isBlank()) return@LaunchedEffect
+        while (isActive) {
+            delay(4_000)
+            try {
+                val response = JSONObject(
+                    ApiClient.request(
+                        apiBase,
+                        "GET",
+                        "/sessions/$selectedRosterSession/attendance",
+                        token
+                    )
+                )
+                roster = parseRoster(response.optJSONArray("records") ?: JSONArray())
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (isAuthenticationRejected(error)) {
+                    onAuthExpired()
+                    return@LaunchedEffect
+                }
+                // Preserve the last roster on a transient polling failure; manual refresh remains available.
+            }
+        }
+    }
+
+    LaunchedEffect(isOrganiser, isBroadcasting, selectedBroadcastSessionId, apiBase, token) {
+        if (!isOrganiser || !isBroadcasting || selectedBroadcastSessionId.isBlank()) {
+            advertiser.stop()
+            return@LaunchedEffect
+        }
+        val broadcastSession = sessions.firstOrNull { it.id == selectedBroadcastSessionId }
+        if (broadcastSession == null) {
+            bleMessage = "Selected session is no longer available."
+            isBroadcasting = false
+            advertiser.stop()
+            return@LaunchedEffect
+        }
+        val scheduledStart = runCatching {
+            OffsetDateTime.parse(broadcastSession.scheduledStart)
+        }.getOrNull()
+        val attendanceDeadline = runCatching {
+            OffsetDateTime.parse(broadcastSession.deadline)
+        }.getOrNull()
+        if (scheduledStart == null || attendanceDeadline == null) {
+            bleMessage = "The session schedule could not be read. Refresh and try again."
+            isBroadcasting = false
+            advertiser.stop()
+            return@LaunchedEffect
+        }
+
+        var lastPayload: ByteArray? = null
+        bleMessage = "Broadcast armed; waiting for the scheduled class time…"
+        try {
+            while (isActive) {
+                val now = OffsetDateTime.now()
+                if (now.isBefore(scheduledStart)) {
+                    val remainingSeconds = Duration.between(now, scheduledStart).seconds
+                    val waitSeconds = remainingSeconds.coerceAtLeast(1).coerceAtMost(5)
+                    bleMessage = "Scheduled for ${formatLocalTime(broadcastSession.scheduledStart)}. BLE broadcast will start automatically at class time."
+                    delay(waitSeconds * 1_000)
+                    continue
+                }
+                if (!now.isBefore(attendanceDeadline)) {
+                    advertiser.stop()
+                    bleMessage = "Attendance window closed at ${formatLocalTime(broadcastSession.deadline)}. Broadcast stopped."
+                    isBroadcasting = false
+                    return@LaunchedEffect
+                }
+                // Wait an extra second after the scheduled boundary to tolerate small
+                // server/device clock differences before requesting the first token.
+                if (lastPayload == null && !OffsetDateTime.now().isBefore(scheduledStart)) {
+                    delay(1_000)
+                }
+                val json = JSONObject(
+                    ApiClient.request(
+                        apiBase,
+                        "GET",
+                        "/sessions/$selectedBroadcastSessionId/current-token",
+                        token
+                    )
+                )
+                val payload = BleProtocol.encode(
+                    json.getString("session_tag"),
+                    json.getString("token")
+                )
+                if (lastPayload == null || !lastPayload!!.contentEquals(payload)) {
+                    advertiser.start(payload) { status ->
+                        scope.launch(Dispatchers.Main.immediate) {
+                            bleMessage = status
+                            if (
+                                status.contains("failed", ignoreCase = true) ||
+                                status.contains("turned off", ignoreCase = true) ||
+                                status.contains("not available", ignoreCase = true) ||
+                                status.contains("unavailable", ignoreCase = true) ||
+                                status.contains("permission is missing", ignoreCase = true) ||
+                                status.contains("does not support", ignoreCase = true)
+                            ) {
+                                isBroadcasting = false
+                            }
+                        }
+                    }
+                    lastPayload = payload
+                }
+                delay(5_000)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (isAuthenticationRejected(error)) {
+                onAuthExpired()
+                return@LaunchedEffect
+            }
+            val detail = error.message.orEmpty()
+            bleMessage = detail.ifBlank { "Could not start BLE advertising." }
+            isBroadcasting = false
+        } finally {
+            advertiser.stop()
+        }
+    }
+
+    LaunchedEffect(isScanning, apiBase, token, deviceRegistered, sessions) {
+        if (!isScanning) {
+            scanner.stop()
+            return@LaunchedEffect
+        }
+        if (!deviceRegistered) {
+            bleMessage = "Register this phone before scanning for attendance."
+            isScanning = false
+            return@LaunchedEffect
+        }
+        if (sessions.isEmpty()) {
+            bleMessage = "There are no eligible active sessions in your enrolled rooms."
+            isScanning = false
+            return@LaunchedEffect
+        }
+        if (!hasRequiredBlePermissions(context)) {
+            bleMessage = "Nearby-device permission is required to scan."
+            isScanning = false
+            return@LaunchedEffect
+        }
+
+        observationsByTag.clear()
+        bleMessage = "Scanning for nearby ProxyProof sessions…"
+        scanner.start(
+            onObservation = { observation ->
+                scope.launch(Dispatchers.Main.immediate) {
+                    if (
+                        !isScanning ||
+                        observation.sessionTag in successfulTags ||
+                        observation.sessionTag in ineligibleTags
+                    ) return@launch
+                    val now = observation.elapsedRealtimeMs
+                    val recent = observationsByTag.getOrPut(observation.sessionTag) { mutableListOf() }
+                    recent.removeAll { now - it.elapsedRealtimeMs > 6_000 }
+                    recent.add(observation)
+                    if (recent.size > 30) recent.removeAt(0)
+
+                    val recentCandidates = observationsByTag.mapNotNull { (tag, values) ->
+                        val window = values.filter { now - it.elapsedRealtimeMs <= 4_000 }
+                        if (window.size < 2) null else {
+                            tag to window
+                        }
+                    }
+                    val stableCandidates = recentCandidates.filter { (_, values) ->
+                        values.size >= 4 &&
+                            values.last().elapsedRealtimeMs - values.first().elapsedRealtimeMs >= 3_000 &&
+                            now - values.last().elapsedRealtimeMs <= 1_500
+                    }
+                    if (stableCandidates.size >= 2) {
+                        val ranked = stableCandidates.map { (tag, values) ->
+                            tag to values.map { it.rssi }.average()
+                        }.sortedByDescending { it.second }
+                        if (kotlin.math.abs(ranked[0].second - ranked[1].second) <= 8.0) {
+                            scanner.stop()
+                            isScanning = false
+                            bleMessage = "Ambiguous room: two sessions have similar signal strength. Move closer to the intended classroom and scan again."
+                            return@launch
+                        }
+                    }
+
+                    val candidate = stableCandidates.maxByOrNull { (_, values) ->
+                        values.map { it.rssi }.average()
+                    } ?: return@launch
+                    val tag = candidate.first
+                    if (tag in successfulTags) return@launch
+                    val lastAttempt = lastAttemptByTag[tag]
+                    if (lastAttempt != null && now - lastAttempt < 10_000) return@launch
+                    lastAttemptByTag[tag] = now
+                    val latest = candidate.second.last()
+                    bleMessage = "Validating presence for a nearby room…"
+                    try {
+                        val candidatePayload = JSONObject()
+                            .put("session_tag", latest.sessionTag)
+                            .put("token", latest.token)
+                            .put("rssi", latest.rssi)
+
+                        val eligibility = JSONObject(
+                            ApiClient.request(
+                                apiBase,
+                                "POST",
+                                "/attendance/ble/eligibility",
+                                token,
+                                candidatePayload
+                            )
+                        )
+                        if (!eligibility.optBoolean("eligible", false)) {
+                            successfulTags.add(tag)
+                            scanner.stop()
+                            isScanning = false
+                            bleMessage = "Attendance was already recorded for ${eligibility.optString("subject_label")} · ${eligibility.optString("room_name")}."
+                            loadData()
+                            return@launch
+                        }
+
+                        val result = JSONObject(
+                            ApiClient.request(
+                                apiBase,
+                                "POST",
+                                "/attendance/ble",
+                                token,
+                                candidatePayload
+                            )
+                        )
+                        successfulTags.add(tag)
+                        scanner.stop()
+                        isScanning = false
+                        bleMessage = "Attendance confirmed: ${result.optString("subject_label")} · ${result.optString("room_name")}."
+                        loadData()
+                    } catch (error: Exception) {
+                        if (isAuthenticationRejected(error)) {
+                            scanner.stop()
+                            isScanning = false
+                            onAuthExpired()
+                            return@launch
+                        }
+                        bleMessage = error.message ?: "Attendance could not be verified by the server."
+                        val text = error.message.orEmpty().lowercase(Locale.getDefault())
+                        if (text.contains("not registered for this room")) {
+                            // A nearby beacon from another classroom must not prevent the
+                            // scanner from finding an enrolled room that is also in range.
+                            ineligibleTags.add(tag)
+                            observationsByTag.remove(tag)
+                            bleMessage = "Nearby session belongs to a room you're not enrolled in. Continuing to search for your registered classroom."
+                        } else if (
+                            text.contains("session is closed") ||
+                            text.contains("outside the 15-minute") ||
+                            text.contains("unknown room session advertisement")
+                        ) {
+                            ineligibleTags.add(tag)
+                            observationsByTag.remove(tag)
+                            bleMessage = "That nearby session is no longer eligible. Continuing to scan for another open room."
+                        } else if (text.contains("already marked")) {
+                            scanner.stop()
+                            isScanning = false
+                            bleMessage = "Attendance is already recorded for this session."
+                        }
+                    }
+                }
+            },
+            onStatus = { status ->
+                scope.launch(Dispatchers.Main.immediate) {
+                    bleMessage = status
+                    if (status.contains("failed", true) ||
+                        status.contains("turned off", true) ||
+                        status.contains("not available", true) ||
+                        status.contains("permission is missing", true)
+                    ) {
+                        isScanning = false
+                    }
+                }
+            }
+        )
+        try {
+            awaitCancellation()
+        } finally {
+            scanner.stop()
+        }
     }
 
     Column(
@@ -514,11 +1112,15 @@ private fun DashboardScreen(
             )
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                StatusPill(text = if (loading) "SYNCING" else "API CONNECTED", positive = !loading)
+                StatusPill(
+                    text = if (loading) "SYNCING" else if (apiConnected) "API CONNECTED" else "API OFFLINE",
+                    positive = apiConnected && !loading
+                )
                 TextButton(onClick = { scope.launch { loadData() } }, enabled = !loading) {
                     Text(if (loading) "Syncing…" else "Refresh")
                 }
             }
+            PrivacyNoticeLink()
         }
 
         if (message.isNotBlank()) {
@@ -600,20 +1202,27 @@ private fun DashboardScreen(
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(value = subject, onValueChange = { subject = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Subject / class") }, singleLine = true)
                 Spacer(Modifier.height(8.dp))
-                Text("Scheduled start: now · deadline: now + 15 min", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                OutlinedTextField(
+                    value = scheduledStartText,
+                    onValueChange = { scheduledStartText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Scheduled start (ISO 8601 with offset)") },
+                    placeholder = { Text("2026-10-13T08:00:00+05:30") },
+                    supportingText = { Text("The server closes automatic attendance 15 minutes after this time.") },
+                    singleLine = true
+                )
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = {
                         scope.launch {
                             busyAction = true
                             try {
-                                val start = OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
                                 val body = JSONObject()
                                     .put("room_id", selectedRoomId)
                                     .put("subject_label", subject.trim())
-                                    .put("scheduled_start_at", start)
+                                    .put("scheduled_start_at", scheduledStartText.trim())
                                 val created = JSONObject(ApiClient.request(apiBase, "POST", "/sessions", token, body))
-                                message = "Attendance session created for ${created.optString("room_name")}. BLE broadcast is the next integration step."
+                                message = "Attendance session created for ${created.optString("room_name")}. Start its BLE broadcast below."
                                 loadData()
                             } catch (error: Exception) {
                                 message = error.message ?: "Could not start the session."
@@ -622,12 +1231,92 @@ private fun DashboardScreen(
                             }
                         }
                     },
-                    enabled = !busyAction && selectedRoomId > 0 && subject.isNotBlank(),
+                    enabled = !busyAction && selectedRoomId > 0 && subject.isNotBlank() && scheduledStartText.isNotBlank(),
                     modifier = Modifier.fillMaxWidth().height(50.dp),
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Text("Start attendance session")
                 }
+            }
+
+            PPPanel {
+                SectionHeading("BLE BROADCAST", "Advertise the rotating session token from this organiser phone.")
+                Spacer(Modifier.height(8.dp))
+                if (sessions.isEmpty()) {
+                    EmptyState("No eligible session to broadcast.", "Start a session during its scheduled attendance window.")
+                } else {
+                    Box {
+                        OutlinedButton(
+                            onClick = { broadcastMenuExpanded = !broadcastMenuExpanded },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(13.dp)
+                        ) {
+                            val chosen = sessions.firstOrNull { it.id == selectedBroadcastSessionId }
+                            Text(
+                                chosen?.let { "${it.roomName} · ${it.subject}" } ?: "Select active session",
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text("⌄")
+                        }
+                        DropdownMenu(
+                            expanded = broadcastMenuExpanded,
+                            onDismissRequest = { broadcastMenuExpanded = false }
+                        ) {
+                            sessions.forEach { session ->
+                                DropdownMenuItem(
+                                    text = { Text("${session.roomName} · ${session.subject}") },
+                                    onClick = {
+                                        selectedBroadcastSessionId = session.id
+                                        broadcastMenuExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = {
+                            if (isBroadcasting) {
+                                isBroadcasting = false
+                                advertiser.stop()
+                                bleMessage = "BLE broadcast stopped."
+                            } else if (!hasRequiredBlePermissions(context, forAdvertising = true)) {
+                                pendingBleAction = "advertise"
+                                blePermissionLauncher.launch(requiredBlePermissions(forAdvertising = true))
+                            } else if (!advertiser.isSupported()) {
+                                bleMessage = "This phone cannot advertise BLE. Use the clearly labelled manual attendance fallback."
+                            } else {
+                                isBroadcasting = true
+                            }
+                        },
+                        enabled = selectedBroadcastSessionId.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isBroadcasting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Text(if (isBroadcasting) "Stop BLE broadcast" else "Start BLE broadcast")
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+                Text(
+                    bleMessage,
+                    color = if (bleMessage.contains("failed", true) || bleMessage.contains("missing", true) ||
+                        bleMessage.contains("cannot", true) || bleMessage.contains("unavailable", true)
+                    ) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    "Foreground only. Prototype manufacturer ID 0xFFFF is development-only and must be replaced before public release.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
             }
 
             PPPanel {
@@ -660,9 +1349,54 @@ private fun DashboardScreen(
                 }
             }
 
+            PPPanel {
+                SectionHeading("SESSION HISTORY", "Recent sessions you own, including expired and closed sessions.")
+                Spacer(Modifier.height(10.dp))
+                val pastSessions = sessionHistory.filterNot { prior ->
+                    sessions.any { active -> active.id == prior.id }
+                }
+                if (pastSessions.isEmpty()) {
+                    EmptyState("No past sessions yet.", "Sessions will appear here after they leave the live list.")
+                } else {
+                    pastSessions.forEach { session ->
+                        SessionCard(
+                            session = session,
+                            organiser = true,
+                            onClose = if (session.status == "closed") null else {
+                                {
+                                    scope.launch {
+                                        try {
+                                            ApiClient.request(apiBase, "POST", "/sessions/${session.id}/close", token)
+                                            message = "Session closed."
+                                            loadData()
+                                        } catch (error: Exception) {
+                                            if (isAuthenticationRejected(error)) onAuthExpired()
+                                            else message = error.message ?: "Could not close session."
+                                        }
+                                    }
+                                }
+                            },
+                            onViewRoster = { scope.launch { loadRoster(session.id) } }
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
+            }
+
             if (selectedRosterSession.isNotBlank()) {
                 PPPanel {
                     SectionHeading("ATTENDANCE ROSTER", "Manual changes are labelled and recorded separately from BLE.")
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch { prepareCsvExport(selectedRosterSession) }
+                        },
+                        enabled = selectedRosterSession.isNotBlank() && !rosterBusy,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(13.dp)
+                    ) {
+                        Text("Export this session as CSV")
+                    }
                     Spacer(Modifier.height(8.dp))
                     if (rosterBusy) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
@@ -735,7 +1469,7 @@ private fun DashboardScreen(
                     MetricBlock("$totalPresent / $totalEligible", "PRESENT", Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(8.dp))
-                Text("BLE scanning will be enabled in the next APK build. This version connects your account, device and rooms to the server.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, lineHeight = 17.sp)
+                Text("Automatic attendance uses foreground BLE discovery and must be confirmed by the server. Keep this screen open and Bluetooth enabled.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, lineHeight = 17.sp)
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = {
@@ -747,6 +1481,10 @@ private fun DashboardScreen(
                                     JSONObject().put("device_key", deviceKey)
                                 )
                                 deviceRegistered = true
+                                prefs.edit()
+                                    .putString("device_registered_username", username)
+                                    .remove("device_registered")
+                                    .apply()
                                 message = "This installation is registered to your account."
                             } catch (error: Exception) {
                                 message = error.message ?: "Device registration failed."
@@ -763,6 +1501,71 @@ private fun DashboardScreen(
                 }
                 Spacer(Modifier.height(6.dp))
                 Text("Installation ID: ${deviceKey.take(8)}…", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+            }
+
+            PPPanel {
+                SectionHeading("BLE ATTENDANCE", "Keep this screen open while the app looks for your enrolled room's beacon.")
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusPill(
+                        text = if (isScanning) "SCANNING" else "STOPPED",
+                        positive = isScanning
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (!blePermissionsGranted) "Nearby-device permission required"
+                        else if (!deviceRegistered) "Register this phone first"
+                        else "Foreground scan only",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = {
+                        if (isScanning) {
+                            isScanning = false
+                            scanner.stop()
+                            bleMessage = "BLE scanning stopped."
+                        } else if (!deviceRegistered) {
+                            bleMessage = "Register this phone before scanning for attendance."
+                        } else if (sessions.isEmpty()) {
+                            bleMessage = "No eligible sessions are active in your enrolled rooms."
+                        } else if (!hasRequiredBlePermissions(context)) {
+                            pendingBleAction = "scan"
+                            blePermissionLauncher.launch(requiredBlePermissions())
+                        } else if (!scanner.isSupported()) {
+                            bleMessage = "This phone does not support BLE scanning."
+                        } else {
+                            observationsByTag.clear()
+                            successfulTags.clear()
+                            lastAttemptByTag.clear()
+                            ineligibleTags.clear()
+                            isScanning = true
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    enabled = isScanning || (deviceRegistered && sessions.isNotEmpty())
+                ) {
+                    Text(if (isScanning) "Stop scanning" else "Start attendance scan")
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    bleMessage,
+                    color = if (bleMessage.contains("failed", true) || bleMessage.contains("could not", true) ||
+                        bleMessage.contains("denied", true) || bleMessage.contains("ambiguous", true)
+                    ) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    "The backend validates the rotating token, registered device, enrolment, session and 15-minute cutoff. Signal strength is only a heuristic.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
             }
 
             PPPanel {
@@ -958,7 +1761,16 @@ private fun SessionCard(
                     Spacer(Modifier.height(3.dp))
                     Text(session.roomName, color = MaterialTheme.colorScheme.secondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
-                StatusPill(if (session.attendanceOpen) "OPEN" else session.status.uppercase(), session.attendanceOpen)
+                val scheduledInFuture = runCatching {
+                    OffsetDateTime.parse(session.scheduledStart).isAfter(OffsetDateTime.now())
+                }.getOrDefault(false)
+                val statusLabel = when {
+                    session.status.equals("closed", ignoreCase = true) -> "CLOSED"
+                    session.attendanceOpen -> "ATTENDANCE OPEN"
+                    scheduledInFuture -> "SCHEDULED"
+                    else -> "WINDOW CLOSED"
+                }
+                StatusPill(statusLabel, session.attendanceOpen)
             }
             Spacer(Modifier.height(9.dp))
             Text(
@@ -973,7 +1785,9 @@ private fun SessionCard(
                 Spacer(Modifier.height(7.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { onViewRoster?.invoke() }, shape = RoundedCornerShape(11.dp)) { Text("View roster") }
-                    TextButton(onClick = { onClose?.invoke() }) { Text("Close session", color = MaterialTheme.colorScheme.error) }
+                    if (onClose != null) {
+                        TextButton(onClick = onClose) { Text("Close session", color = MaterialTheme.colorScheme.error) }
+                    }
                 }
             }
         }

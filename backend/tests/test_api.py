@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db, normalize_database_url
 from app.main import app
-from app.models import AttendanceSession
+from app.models import AttendanceSession, User
 
 test_engine = create_engine(
     "sqlite://",
@@ -422,3 +422,214 @@ def test_database_url_normalizes_render_postgres_schemes():
     ) == "postgresql+psycopg://user:pass@host:5432/db"
     assert normalize_database_url("sqlite:///./proxyproof.db") == "sqlite:///./proxyproof.db"
 
+def test_organiser_can_only_manage_their_own_sessions(client: TestClient):
+    owner = register_user(client, "owner_teacher", role="organiser")
+    other = register_user(client, "other_teacher", role="organiser")
+    room_id = create_room(client, owner, "401")
+    response = create_session(client, owner, room_id)
+    assert response.status_code == 201, response.text
+    session_id = response.json()["id"]
+
+    assert client.get(
+        f"/sessions/{session_id}",
+        headers=owner["headers"],
+    ).status_code == 200
+    assert client.get(
+        f"/sessions/{session_id}/current-token",
+        headers=owner["headers"],
+    ).status_code == 200
+
+    assert client.get(
+        "/sessions/active",
+        headers=other["headers"],
+    ).json() == []
+    assert client.get(
+        f"/sessions/{session_id}",
+        headers=other["headers"],
+    ).status_code == 403
+    assert client.get(
+        f"/sessions/{session_id}/current-token",
+        headers=other["headers"],
+    ).status_code == 403
+    assert client.get(
+        f"/sessions/{session_id}/attendance",
+        headers=other["headers"],
+    ).status_code == 403
+    assert client.post(
+        f"/sessions/{session_id}/close",
+        headers=other["headers"],
+    ).status_code == 403
+    assert client.get(
+        "/attendance/export.csv",
+        params={"session_id": session_id},
+        headers=other["headers"],
+    ).status_code == 403
+
+    assert client.post(
+        f"/sessions/{session_id}/close",
+        headers=owner["headers"],
+    ).status_code == 200
+
+def test_organisers_cannot_create_sessions_for_another_organisers_room(client: TestClient):
+    first = register_user(client, "first_organiser", role="organiser")
+    second = register_user(client, "second_organiser", role="organiser")
+    first_room_id = create_room(client, first, "501")
+    second_room_id = create_room(client, second, "502")
+
+    first_rooms = {
+        row["id"] for row in client.get("/rooms", headers=first["headers"]).json()
+    }
+    second_rooms = {
+        row["id"] for row in client.get("/rooms", headers=second["headers"]).json()
+    }
+    assert first_room_id in first_rooms
+    assert second_room_id not in first_rooms
+    assert second_room_id in second_rooms
+    assert first_room_id not in second_rooms
+
+    assert create_session(client, first, first_room_id).status_code == 201
+    assert create_session(client, second, second_room_id).status_code == 201
+    assert create_session(client, first, second_room_id).status_code == 403
+
+def test_csv_export_neutralises_spreadsheet_formulas(client: TestClient):
+    organiser = register_user(client, "csv_teacher", role="organiser")
+    student = register_user(client, "csv_student")
+    room_id = create_room(client, organiser, "601")
+    enroll(client, student, room_id)
+    session = create_session(
+        client,
+        organiser,
+        room_id,
+        subject="=1+1",
+    ).json()
+
+    db = TestSessionLocal()
+    try:
+        student_row = db.get(User, student["user"]["id"])
+        student_row.display_name = "=HYPERLINK(\"https://example.invalid\",\"click\")"
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get(
+        "/attendance/export.csv",
+        params={"session_id": session["id"]},
+        headers=organiser["headers"],
+    )
+    assert response.status_code == 200
+    assert "'=HYPERLINK" in response.text
+    assert "'=1+1" in response.text
+
+def test_future_session_is_visible_to_owner_but_not_student(client: TestClient):
+    organiser = register_user(client, "scheduled_teacher", role="organiser")
+    student = register_user(client, "scheduled_student")
+    room_id = create_room(client, organiser, "701")
+    enroll(client, student, room_id)
+    future_session = create_session(
+        client,
+        organiser,
+        room_id,
+        start_offset_minutes=5,
+        subject="Scheduled Class",
+    )
+    assert future_session.status_code == 201, future_session.text
+    session_id = future_session.json()["id"]
+
+    owner_sessions = client.get("/sessions/active", headers=organiser["headers"])
+    assert owner_sessions.status_code == 200
+    assert session_id in {item["id"] for item in owner_sessions.json()}
+    owner_item = next(item for item in owner_sessions.json() if item["id"] == session_id)
+    assert owner_item["attendance_open"] is False
+
+    student_sessions = client.get("/sessions/active", headers=student["headers"])
+    assert student_sessions.status_code == 200
+    assert session_id not in {item["id"] for item in student_sessions.json()}
+
+def test_production_login_rate_limit_returns_429(client: TestClient, monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("RENDER", raising=False)
+
+    for _ in range(10):
+        response = client.post(
+            "/auth/login",
+            json={"username": "rate_limit_user", "password": "wrong-password"},
+        )
+        assert response.status_code == 401
+
+    limited = client.post(
+        "/auth/login",
+        json={"username": "rate_limit_user", "password": "wrong-password"},
+    )
+    assert limited.status_code == 429
+    assert int(limited.headers["Retry-After"]) > 0
+
+def test_logout_revokes_only_the_current_access_token(client: TestClient):
+    user = register_user(client, "logout_student")
+    revoked = client.post("/auth/logout", headers=user["headers"])
+    assert revoked.status_code == 204
+    assert client.get("/auth/me", headers=user["headers"]).status_code == 401
+
+    other = register_user(client, "logout_other_student")
+    assert client.get("/auth/me", headers=other["headers"]).status_code == 200
+
+def test_organiser_session_history_includes_closed_sessions_and_is_owner_scoped(client: TestClient):
+    owner = register_user(client, "history_owner", role="organiser")
+    other = register_user(client, "history_other", role="organiser")
+    room_id = create_room(client, owner, "801")
+    response = create_session(client, owner, room_id, subject="Past session")
+    assert response.status_code == 201, response.text
+    session_id = response.json()["id"]
+    close = client.post(
+        f"/sessions/{session_id}/close",
+        headers=owner["headers"],
+    )
+    assert close.status_code == 200
+
+    history = client.get("/sessions/my", headers=owner["headers"])
+    assert history.status_code == 200
+    assert [item["id"] for item in history.json()] == [session_id]
+    assert history.json()[0]["status"] == "closed"
+
+    other_history = client.get("/sessions/my", headers=other["headers"])
+    assert other_history.status_code == 200
+    assert session_id not in {item["id"] for item in other_history.json()}
+    assert client.get("/sessions/my", headers=register_user(client, "history_student")["headers"]).status_code == 403
+
+def test_ble_eligibility_is_read_only_and_detects_existing_attendance(client: TestClient):
+    student = register_user(client, "eligibility_student")
+    organiser = register_user(client, "eligibility_teacher", role="organiser")
+    room_id = create_room(client, organiser)
+    enroll(client, student, room_id)
+    register_device(client, student)
+    session = create_session(client, organiser, room_id, subject="Eligibility Test").json()
+    ad = get_ble_advertisement(client, organiser, session["id"])
+    payload = {"session_tag": ad["session_tag"], "token": ad["token"], "rssi": -54}
+
+    eligibility = client.post(
+        "/attendance/ble/eligibility",
+        headers=student["headers"],
+        json=payload,
+    )
+    assert eligibility.status_code == 200, eligibility.text
+    assert eligibility.json()["eligible"] is True
+    assert eligibility.json()["already_marked"] is False
+    assert eligibility.json()["session_id"] == session["id"]
+    assert eligibility.json()["room_name"]
+    assert eligibility.json()["subject_label"] == "Eligibility Test"
+
+    # Checking eligibility must not silently create an attendance record.
+    history = client.get("/attendance/me", headers=student["headers"])
+    assert history.status_code == 200
+    assert history.json()["items"] == []
+
+    marked = client.post("/attendance/ble", headers=student["headers"], json=payload)
+    assert marked.status_code == 200, marked.text
+
+    after_marking = client.post(
+        "/attendance/ble/eligibility",
+        headers=student["headers"],
+        json=payload,
+    )
+    assert after_marking.status_code == 200, after_marking.text
+    assert after_marking.json()["eligible"] is False
+    assert after_marking.json()["already_marked"] is True

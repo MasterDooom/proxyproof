@@ -6,16 +6,22 @@ a rough proximity heuristic and cannot prove someone is inside a classroom.
 import csv
 import hmac
 import os
+from pathlib import Path
 import time
+from threading import Lock
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .database import Base, engine, get_db
+from .config import is_production_environment
+from .database import get_db
 from .models import (
     ApiToken,
     AttendanceRecord,
@@ -34,6 +40,7 @@ from .schemas import (
     AttendanceRosterResponse,
     AuthResponse,
     BleAttendanceRequest,
+    BleEligibilityOut,
     BleTokenOut,
     DeviceOut,
     DeviceRegisterRequest,
@@ -51,6 +58,8 @@ from .security import (
     MIN_RSSI_DBM,
     current_ble_slot,
     get_current_user,
+    get_organiser_invite_code,
+    hash_access_token,
     hash_password,
     issue_access_token,
     make_ble_token,
@@ -61,16 +70,75 @@ from .security import (
 )
 
 ATTENDANCE_GRACE_MINUTES = 15
-ORGANISER_INVITE_CODE = os.getenv(
-    "PROXYPROOF_ORGANISER_INVITE_CODE", "local-demo-organiser-code"
-)
-Base.metadata.create_all(bind=engine)
-
+ORGANISER_INVITE_CODE = get_organiser_invite_code()
 app = FastAPI(
     title="ProxyProof API",
     description="Room-specific BLE attendance prototype",
     version="0.2.0",
 )
+
+
+@app.on_event("startup")
+def migrate_hosted_database() -> None:
+    """Apply versioned schema changes before accepting requests on hosted deployments."""
+    if not is_production_environment():
+        return
+    config_path = Path(__file__).resolve().parent.parent / "alembic.ini"
+    alembic_config = AlembicConfig(str(config_path))
+    alembic_command.upgrade(alembic_config, "head")
+
+
+# In-process emergency rate limits for credential endpoints. For multi-instance
+# production deployments, enforce an additional shared/edge limiter as well.
+_RATE_LIMITS = {
+    "/auth/login": (10, 60),
+    "/auth/register": (20, 60),
+    "/attendance/ble/eligibility": (30, 60),
+    "/attendance/ble": (30, 60),
+}
+_rate_limit_state: dict[tuple[str, str], tuple[float, int]] = {}
+_rate_limit_lock = Lock()
+_rate_limit_requests = 0
+
+
+@app.middleware("http")
+async def rate_limit_authentication(request: Request, call_next):
+    global _rate_limit_requests
+    rule = _RATE_LIMITS.get(request.url.path)
+    if (
+        rule is None
+        or request.method != "POST"
+        or not is_production_environment()
+    ):
+        return await call_next(request)
+
+    limit, window_seconds = rule
+    client_ip = request.client.host if request.client else "unknown"
+    key = (request.url.path, client_ip)
+    now = time.monotonic()
+    with _rate_limit_lock:
+        start, count = _rate_limit_state.get(key, (now, 0))
+        if now - start >= window_seconds:
+            start, count = now, 0
+        if count >= limit:
+            retry_after = max(1, int(window_seconds - (now - start)))
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Wait before trying again."},
+                headers={"Retry-After": str(retry_after)},
+            )
+        _rate_limit_state[key] = (start, count + 1)
+        _rate_limit_requests += 1
+        if _rate_limit_requests % 256 == 0 and len(_rate_limit_state) > 4096:
+            expired = [
+                bucket_key
+                for bucket_key, (bucket_start, _) in _rate_limit_state.items()
+                if now - bucket_start > 3600
+            ]
+            for bucket_key in expired:
+                _rate_limit_state.pop(bucket_key, None)
+
+    return await call_next(request)
 
 
 def as_utc(value: datetime) -> datetime:
@@ -112,6 +180,15 @@ def get_session_or_404(session_id: str, db: Session) -> AttendanceSession:
     return item
 
 
+def require_session_owner(item: AttendanceSession, user: User) -> None:
+    """Restrict organiser management to sessions created by that organiser."""
+    if user.role != "organiser" or item.created_by_user_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorised to manage this attendance session.",
+        )
+
+
 def require_room_enrollment(student_id: int, room_id: int, db: Session) -> RoomEnrollment:
     enrollment = db.scalar(
         select(RoomEnrollment).where(
@@ -125,6 +202,13 @@ def require_room_enrollment(student_id: int, room_id: int, db: Session) -> RoomE
             detail="You are not registered for this room. Register for the room first.",
         )
     return enrollment
+
+
+def csv_safe_cell(value):
+    """Neutralise spreadsheet formula injection in CSV string fields."""
+    if isinstance(value, str) and value.lstrip(" \\t\\r\\n").startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
 
 
 def roster_item(
@@ -212,6 +296,23 @@ def auth_me(user: User = Depends(get_current_user)) -> UserOut:
     return user_to_response(user)
 
 
+@app.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """Revoke the current opaque bearer token."""
+    parts = request.headers.get("Authorization", "").split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    token_row = db.get(ApiToken, hash_access_token(parts[1]))
+    if token_row is not None and token_row.user_id == user.id:
+        db.delete(token_row)
+        db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.post("/devices/register", response_model=DeviceOut, status_code=status.HTTP_201_CREATED)
 def register_device(
     payload: DeviceRegisterRequest,
@@ -257,27 +358,29 @@ def register_device(
 @app.get("/rooms", response_model=list[RoomOut])
 def list_rooms(
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[Room]:
-    return list(
-        db.scalars(
-            select(Room)
-            .where(Room.is_active.is_(True))
-            .order_by(Room.building, Room.room_code)
+    query = select(Room).where(Room.is_active.is_(True))
+    if user.role == "organiser":
+        # Legacy unowned rooms remain visible for migration/compatibility; newly
+        # created rooms are listed only to their owner.
+        query = query.where(
+            or_(Room.created_by_user_id == user.id, Room.created_by_user_id.is_(None))
         )
-    )
+    return list(db.scalars(query.order_by(Room.building, Room.room_code)))
 
 
 @app.post("/rooms", response_model=RoomOut, status_code=status.HTTP_201_CREATED)
 def create_room(
     payload: RoomCreate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> Room:
     room = Room(
         building=payload.building.strip(),
         room_code=payload.room_code.strip(),
         display_name=payload.display_name.strip(),
+        created_by_user_id=user.id,
     )
     db.add(room)
     try:
@@ -344,11 +447,16 @@ def my_rooms(
 def create_session(
     payload: SessionCreate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> SessionOut:
     room = db.get(Room, payload.room_id)
     if room is None or not room.is_active:
         raise HTTPException(status_code=404, detail="Active room not found.")
+    if room.created_by_user_id is not None and room.created_by_user_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorised to create sessions for this room.",
+        )
 
     scheduled_aware = payload.scheduled_start_at.astimezone(timezone.utc)
     now = datetime.now(timezone.utc)
@@ -361,6 +469,7 @@ def create_session(
 
     item = AttendanceSession(
         room_id=room.id,
+        created_by_user_id=user.id,
         subject_label=payload.subject_label,
         scheduled_start_at=scheduled_aware.replace(tzinfo=None),
         attendance_deadline=deadline_aware.replace(tzinfo=None),
@@ -378,25 +487,43 @@ def create_session(
     return session_to_response(item)
 
 
+@app.get("/sessions/my", response_model=list[SessionOut])
+def organiser_session_history(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role("organiser")),
+) -> list[SessionOut]:
+    """Return recent and historical sessions owned by this organiser."""
+    items = db.scalars(
+        select(AttendanceSession)
+        .where(AttendanceSession.created_by_user_id == user.id)
+        .order_by(AttendanceSession.scheduled_start_at.desc())
+        .limit(200)
+    ).all()
+    return [session_to_response(item) for item in items]
+
+
 @app.get("/sessions/active", response_model=list[SessionOut])
 def list_current_attendance_sessions(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[SessionOut]:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    query = (
-        select(AttendanceSession)
-        .where(
-            AttendanceSession.status == "open",
-            AttendanceSession.scheduled_start_at <= now,
-            AttendanceSession.attendance_deadline >= now,
-        )
-        .order_by(AttendanceSession.scheduled_start_at)
+    query = select(AttendanceSession).where(
+        AttendanceSession.status == "open",
+        AttendanceSession.attendance_deadline >= now,
     )
     if user.role == "student":
-        query = query.join(
+        # Students see only sessions whose automatic attendance window is open.
+        query = query.where(
+            AttendanceSession.scheduled_start_at <= now
+        ).join(
             RoomEnrollment, RoomEnrollment.room_id == AttendanceSession.room_id
         ).where(RoomEnrollment.user_id == user.id)
+    elif user.role == "organiser":
+        # Organisers also need to see future scheduled sessions so they can
+        # select the correct class and begin advertising at the scheduled time.
+        query = query.where(AttendanceSession.created_by_user_id == user.id)
+    query = query.order_by(AttendanceSession.scheduled_start_at)
     items = db.scalars(query).unique().all()
     return [session_to_response(item) for item in items]
 
@@ -405,9 +532,10 @@ def list_current_attendance_sessions(
 def get_current_ble_token(
     session_id: str,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> BleTokenOut:
     item = get_session_or_404(session_id, db)
+    require_session_owner(item, user)
     now = datetime.now(timezone.utc)
     if item.status != "open":
         raise HTTPException(status_code=409, detail="This session is closed.")
@@ -434,9 +562,10 @@ def get_current_ble_token(
 def get_session_attendance(
     session_id: str,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> AttendanceRosterResponse:
     item = get_session_or_404(session_id, db)
+    require_session_owner(item, user)
     enrollments = db.scalars(
         select(RoomEnrollment)
         .where(RoomEnrollment.room_id == item.room_id)
@@ -476,9 +605,10 @@ def manual_attendance(
     session_id: str,
     payload: ManualAttendanceRequest,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> AttendanceRosterItem:
     session = get_session_or_404(session_id, db)
+    require_session_owner(session, user)
     student = db.get(User, payload.student_id)
     if student is None or student.role != "student":
         raise HTTPException(status_code=404, detail="Student not found.")
@@ -512,12 +642,12 @@ def manual_attendance(
     return roster_item(student, record)
 
 
-@app.post("/attendance/ble", response_model=AttendanceMarkedResponse)
-def submit_ble_attendance(
+def validate_ble_candidate(
     payload: BleAttendanceRequest,
-    db: Session = Depends(get_db),
-    student: User = Depends(require_role("student")),
-) -> AttendanceMarkedResponse:
+    db: Session,
+    student: User,
+) -> tuple[AttendanceSession, Device, AttendanceRecord | None]:
+    """Validate a detected beacon without creating an attendance record."""
     device = db.scalar(
         select(Device).where(Device.user_id == student.id, Device.is_active.is_(True))
     )
@@ -549,6 +679,34 @@ def submit_ble_attendance(
             AttendanceRecord.student_id == student.id,
         )
     )
+    return session, device, existing
+
+
+@app.post("/attendance/ble/eligibility", response_model=BleEligibilityOut)
+def check_ble_eligibility(
+    payload: BleAttendanceRequest,
+    db: Session = Depends(get_db),
+    student: User = Depends(require_role("student")),
+) -> BleEligibilityOut:
+    """Check whether a nearby session could mark this student without marking them yet."""
+    session, _device, existing = validate_ble_candidate(payload, db, student)
+    return BleEligibilityOut(
+        session_id=session.id,
+        room_name=session.room.display_name,
+        subject_label=session.subject_label,
+        attendance_deadline=as_utc(session.attendance_deadline),
+        eligible=existing is None,
+        already_marked=existing is not None,
+    )
+
+
+@app.post("/attendance/ble", response_model=AttendanceMarkedResponse)
+def submit_ble_attendance(
+    payload: BleAttendanceRequest,
+    db: Session = Depends(get_db),
+    student: User = Depends(require_role("student")),
+) -> AttendanceMarkedResponse:
+    session, device, existing = validate_ble_candidate(payload, db, student)
     if existing is not None:
         raise HTTPException(status_code=409, detail="Attendance is already recorded for this session.")
 
@@ -645,9 +803,10 @@ def my_attendance(
 def export_attendance_csv(
     session_id: str = Query(min_length=1),
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> Response:
     session = get_session_or_404(session_id, db)
+    require_session_owner(session, user)
     enrollments = db.scalars(
         select(RoomEnrollment).where(RoomEnrollment.room_id == session.room_id)
     ).all()
@@ -670,15 +829,15 @@ def export_attendance_csv(
             continue
         record = records.get(student_id)
         writer.writerow([
-            user.id,
-            user.username,
-            user.display_name,
-            session.room.display_name,
-            session.subject_label,
-            record.status if record else "absent",
-            record.method if record else "",
-            as_utc(record.marked_at).isoformat() if record else "",
-            record.rssi_at_mark if record and record.rssi_at_mark is not None else "",
+            csv_safe_cell(user.id),
+            csv_safe_cell(user.username),
+            csv_safe_cell(user.display_name),
+            csv_safe_cell(session.room.display_name),
+            csv_safe_cell(session.subject_label),
+            csv_safe_cell(record.status if record else "absent"),
+            csv_safe_cell(record.method if record else ""),
+            csv_safe_cell(as_utc(record.marked_at).isoformat() if record else ""),
+            csv_safe_cell(record.rssi_at_mark if record and record.rssi_at_mark is not None else ""),
         ])
     filename = f"proxyproof-{session.room.room_code}-{session.id[:8]}.csv"
     return Response(
@@ -697,6 +856,8 @@ def get_session(
     item = get_session_or_404(session_id, db)
     if user.role == "student":
         require_room_enrollment(user.id, item.room_id, db)
+    elif user.role == "organiser":
+        require_session_owner(item, user)
     return session_to_response(item)
 
 
@@ -704,9 +865,10 @@ def get_session(
 def close_session(
     session_id: str,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> SessionOut:
     item = get_session_or_404(session_id, db)
+    require_session_owner(item, user)
     item.status = "closed"
     db.commit()
     db.refresh(item)

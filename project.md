@@ -10,43 +10,43 @@ This is a prototype, not production-grade proof of physical presence. BLE RSSI i
 
 - Android-first: Kotlin + Jetpack Compose.
 - One Android app supports Student and Organiser roles to keep the four-day scope achievable.
-- Backend: FastAPI + SQLite for the prototype. Keep persistence behind SQLAlchemy so SQLite can later be replaced with PostgreSQL.
+- Backend: FastAPI + SQLAlchemy; SQLite for local development/tests and PostgreSQL for hosted deployments. Keep schemas and storage semantics consistent across both.
 - BLE: Android BLE advertiser on the organiser's phone; Android BLE scanner on student phones. Foreground operation first.
 - No separate React dashboard in the four-day MVP. The organiser dashboard is an app screen. A web dashboard is a post-deadline enhancement.
 - API polling for live attendance (about every 3–5 seconds while a session is open); avoid WebSockets until the core flow works.
 - GitHub is the source of truth. Work in small, testable stages; do not generate a giant untested code dump.
 
-## 2A. Implementation status as of 2026-10-13
+## 2A. Implementation status — readiness branch
 
-Implemented in the repository:
-- FastAPI + SQLAlchemy + SQLite backend.
+### Implemented in this branch
+
+- FastAPI + SQLAlchemy data layer with SQLite local development and PostgreSQL/psycopg support.
 - Student/organiser registration and login, PBKDF2 password hashing, 24-hour opaque bearer tokens stored as hashes, and role checks.
-- Single installation-key binding per student account.
-- Room creation/listing and student self-enrollment for the prototype.
-- Scheduled session creation with a server-computed 15-minute attendance deadline.
-- Random 6-byte per-session BLE tag plus an HMAC-derived 8-byte token rotating every 20 seconds.
-- BLE attendance submission validation: active session, deadline, room enrollment, registered device, current/previous token slot, rough RSSI threshold and one record per student/session.
-- Manual organiser corrections, student attendance history/percentage, organiser roster and session CSV export.
-- API tests and GitHub Actions workflow; 13 tests passed in CI on 2026-10-13 (run: https://github.com/MasterDooom/proxyproof/actions/runs/38371533680).
+- Fail-closed hosted configuration: Render requires DATABASE_URL, PROXYPROOF_TOKEN_SECRET (at least 32 bytes), and PROXYPROOF_ORGANISER_INVITE_CODE (at least 16 bytes). Local development fallbacks are explicit.
+- Room ownership and session ownership enforcement for organisers, while student access remains constrained by room enrolment.
+- Versioned Alembic migrations to adopt the prior prototype schema without dropping its rows, then add session and room ownership. Migration tests cover fresh SQLite databases and legacy data preservation.
+- Room creation/enrolment, device binding, session-specific BLE tag and rotating HMAC token APIs, automatic attendance validation, server-computed scheduled_start_at + 15 minutes cutoff, one-record-per-student/session integrity, manual correction, attendance history/percentage, roster and CSV export.
+- Android Kotlin/Jetpack Compose app with student and organiser flows, editable API base URL, encrypted bearer-token storage using Android Keystore, debug-only HTTP configuration, and hosted HTTPS release default.
+- Android foreground BLE advertiser/scanner components, shared 14-byte packet codec, 20-second server token rotation, repeated observations/dwell heuristic, ambiguity detection, role-specific permissions, cancellation/cleanup, scheduled broadcast arming, cutoff shutdown, server eligibility preflight, and clearly labelled manual fallback.
+- Backend and Android GitHub Actions workflows. Latest backend CI passed 31 tests (run: https://github.com/MasterDooom/proxyproof/actions/runs/38427063754). Latest Android unit-test/debug-APK build passed for the same source revision (run: https://github.com/MasterDooom/proxyproof/actions/runs/38427055486); artifact `proxyproof-debug-apk` is available from that run.
+- Render service and PostgreSQL instance exist in the connected Render account, but DATABASE_URL is not yet configured for the service. No production data-persistence claim is made.
 
-Implemented after the backend milestone:
-- Android Jetpack Compose app with login/register, editable API URL, student dashboard, room enrolment, one-installation registration, history/percentage, organiser room creation, session controls, roster, and manual attendance correction.
-- Android debug APK builds in GitHub Actions. Verified successful build on 2026-10-13 (run: https://github.com/MasterDooom/proxyproof/actions/runs/38373408341); artifact name `proxyproof-debug-apk`.
-- Render Blueprint added at repository root to create public HTTPS FastAPI service and PostgreSQL datastore. Deployment is not complete until the owner links the repo to a Render account and fills the organiser invite code.
-- Android target SDK 36 and minimum SDK 26 for a stable prototype build.
+### Not yet verified or implemented
 
-Not yet implemented:
-- Android BLE advertising/scanning and real-device discovery/submission.
-- Live hosting still requires the owner-authorised Render Blueprint creation flow. Free Render Postgres expires after 30 days; upgrade before expiry to retain data.
-- A real device-change approval UI/endpoint (mismatched device keys are rejected).
-- Production-grade authentication/authorisation, hardware-backed device attestation or robust inside-room proof.
+- End-to-end BLE operation on two physical Android phones. CI can validate packet-codec logic, not radio behaviour or device/OEM compatibility.
+- Persistent hosted database connectivity, migration execution against Render PostgreSQL, and create/read/restart persistence smoke tests. These require securely setting DATABASE_URL in the Render service dashboard.
+- Background BLE attendance; the initial design is explicitly foreground-only and stops BLE when the app leaves the foreground.
+- Organiser-approved device replacement UI/endpoint and account recovery. Process-local per-IP login/registration and BLE request throttles are implemented; shared/distributed rate limiting and revocation of all sessions remain release work.
+- Production manufacturer identifier/protocol configuration. The current 0xFFFF manufacturer identifier is for development testing only and must be replaced before public distribution.
+- Strong physical-presence proof. RSSI and rotating tokens do not stop all live relays, spoofing or attendance outside a classroom; device binding is an app-installation UUID, not hardware-backed attestation.
+- Public-store release signing, durable production hosting/backup policy, and policy/privacy review.
 
 ## 3. Roles and core flows
 
 ### Organiser
 1. Sign in using demo credentials or create an organiser account.
 2. Create/select a room (building + room code/name, e.g. AB1-301) and subject.
-3. Start a session for that room with a configurable duration (default 5 minutes).
+3. Create a session with an explicit scheduled class start time. The automatic attendance cutoff is always scheduled start plus 15 minutes; it is not a duration counted from the organiser tapping Start.
 4. App requests a fresh session token from the backend and advertises a compact payload over BLE.
 5. View detected/marked students, manually add/remove attendance, and close the session.
 6. View session history and export attendance as CSV.
@@ -56,7 +56,7 @@ Not yet implemented:
 2. Join/select rooms they are enrolled in. In a real deployment, room enrolments should be assigned/approved by an organiser; the prototype may expose a controlled demo enrolment flow.
 3. Keep the app's foreground attendance screen open during the demo.
 4. Scan for active ProxyProof advertisements.
-5. For an eligible room, collect repeated observations over a short dwell window; submit the session ID and latest rotating token with the authenticated student's identity.
+5. For a stable candidate, collect repeated observations over the dwell window; submit the six-byte session tag, latest rotating token and observed RSSI under the student's authenticated account. The server resolves the tag to the session.
 6. Display a clear state: scanning, candidate detected, validating, present, ambiguous room, or session closed.
 7. View attendance history and percentage.
 
@@ -109,13 +109,13 @@ Limitations:
                ▼
     FastAPI backend
       ├── Authentication + device binding
-      ├── Rooms + enrolments
+      ├── Room/session owner checks + enrolments
       ├── Attendance sessions + rotating tokens
-      ├── Attendance validation
+      ├── Attendance validation + cutoff enforcement
       └── History + CSV export
                │
                ▼
-    SQLAlchemy models + SQLite database
+    SQLAlchemy models + local SQLite / hosted PostgreSQL
 
 Keep BLE platform code separate from Compose screens. Suggested Android packages:
 - ui/auth
@@ -149,13 +149,13 @@ Suggested backend modules:
 - `User`: ID, username, display name, PBKDF2 password hash, role and active flag.
 - `ApiToken`: SHA-256 hash of an opaque bearer token, user ID, expiry and creation time. Raw access tokens are returned once and not persisted.
 - `Device`: user ID, app-generated installation UUID, active flag and registration time. The current prototype permits one installation per student but does not provide device replacement approval yet.
-- `Room`: stable room ID, building, room code and display name.
+- `Room`: stable room ID, building, room code, display name and nullable organiser owner (nullable for migrated legacy rows).
 - `RoomEnrollment`: user ID, room ID and enrollment time. For the prototype, students can self-enroll in rooms; real deployment should require organiser approval or roster provisioning.
-- `AttendanceSession`: UUID, room ID, subject, scheduled start, calculated deadline, status and creation time.
+- `AttendanceSession`: UUID, room ID, organiser owner, subject, scheduled start, calculated deadline, status and creation time.
 - `SessionBleTag`: random 6-byte public session tag (12 hex characters).
 - `AttendanceRecord`: session ID, student ID, device ID, marked time, method (`ble` or `manual`), reported RSSI and status. Unique constraint on `(session_id, student_id)`.
 
-The BLE token is computed as a truncated HMAC of the session ID and the current 20-second time slot; it is not stored in the database. The server accepts the current or previous slot to tolerate a rotation boundary, but never accepts new automatic attendance after the session's 15-minute deadline.
+The BLE token is computed as a truncated HMAC of the session ID and the current 20-second time slot; it is not stored in the database. The server accepts the current or previous slot to tolerate a rotation boundary, but never accepts new automatic attendance after the session's 15-minute deadline. The Android packet codec places the six raw bytes of session tag followed by eight raw bytes of token in manufacturer data; the current `0xFFFF` identifier is development-only.
 
 Store timestamps as UTC. SQLite stores naive UTC datetimes in this prototype; API responses convert them to timezone-aware UTC values.
 
@@ -164,7 +164,8 @@ Store timestamps as UTC. SQLite stores naive UTC datetimes in this prototype; AP
 Authentication:
 - `POST /auth/register` — register student; organiser registration requires a local invite code.
 - `POST /auth/login` — return opaque bearer token.
-- `GET /auth/me` — current authenticated user.
+- `GET /auth/me` — current authenticated user
+- `POST /auth/logout` — revoke the current bearer token.
 
 Rooms and devices:
 - `POST /devices/register` — bind a student to one app installation key.
@@ -175,7 +176,8 @@ Rooms and devices:
 
 Sessions and attendance:
 - `POST /sessions` — organiser starts a scheduled session; server computes deadline as scheduled start + 15 minutes.
-- `GET /sessions/active` — list currently eligible sessions; student results are restricted to enrolled rooms.
+- `GET /sessions/active` — list currently eligible sessions; student results are restricted to enrolled rooms and organisers see their own scheduled/live sessions
+- `GET /sessions/my` — recent and historical sessions owned by the organiser.
 - `GET /sessions/{session_id}` — session detail.
 - `GET /sessions/{session_id}/current-token` — organiser gets compact BLE session tag and current rotating token.
 - `POST /sessions/{session_id}/close` — organiser closes session early.

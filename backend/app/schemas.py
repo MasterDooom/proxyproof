@@ -131,6 +131,15 @@ class BleAttendanceRequest(BaseModel):
     rssi: int = Field(ge=-127, le=0)
 
 
+class BleEligibilityOut(BaseModel):
+    session_id: str
+    room_name: str
+    subject_label: str
+    attendance_deadline: datetime
+    eligible: bool
+    already_marked: bool
+
+
 class AttendanceMarkedResponse(BaseModel):
     status: Literal["present"]
     session_id: str

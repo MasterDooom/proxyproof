@@ -9,6 +9,8 @@ cd backend
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+$env:APP_ENV = "development"
+.\.venv\Scripts\python.exe -m alembic upgrade head
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -35,7 +37,7 @@ The Blueprint defines:
 
 Wait for deployment to finish and test `https://YOUR-SERVICE.onrender.com/health`. The health check executes `SELECT 1` against the configured database. If it fails, check the deploy logs and Render environment settings.
 
-The database URL is normalised from Render's `postgresql://` format to `postgresql+psycopg://`; `psycopg[binary]` is installed from requirements. SQLite remains the default when `DATABASE_URL` is not set.
+The database URL is normalised from Render's `postgresql://` format to `postgresql+psycopg://`; `psycopg[binary]` is installed from requirements. Local development defaults to SQLite. Hosted deployments refuse to start without `DATABASE_URL` instead of silently using ephemeral SQLite. Versioned Alembic migrations run before Uvicorn starts; the baseline migration adopts existing prototype tables without dropping them, and additive migrations add session and room ownership safely.
 
 ## API happy path
 
@@ -43,12 +45,12 @@ The database URL is normalised from Render's `postgresql://` format to `postgres
 2. Create a room using `POST /rooms`.
 3. Register a student account; use `POST /devices/register` to bind a random app-installation UUID.
 4. Enrol the student with `POST /rooms/{room_id}/enroll`.
-5. Start a session with `POST /sessions` and a timezone-aware `scheduled_start_at`.
+5. Start a session with `POST /sessions` and a timezone-aware `scheduled_start_at`; organisers can review owned active and historical sessions with `GET /sessions/my`.
 6. Organiser polls `GET /sessions/{session_id}/current-token`; the app should broadcast the returned six-byte session tag and 8-byte rotating HMAC token over BLE.
 7. Student BLE scanner submits `POST /attendance/ble` with session tag, current token, and observed RSSI.
 8. The organiser roster is `GET /sessions/{session_id}/attendance`; manual correction is `POST /sessions/{session_id}/attendance/manual`; student history is `GET /attendance/me`; CSV is `GET /attendance/export.csv?session_id=...`.
 
-The current Android APK does not perform BLE yet, so attendance can currently be tested with the manual organiser controls.
+The readiness branch includes foreground BLE advertising/scanning and a development-only manufacturer-data identifier. Validate this on two physical Android devices before relying on BLE in class; manual organiser attendance remains the fallback. The development manufacturer ID must be replaced with a properly assigned/approved protocol identifier before public release.
 
 ## Attendance cutoff
 
@@ -58,4 +60,4 @@ The server computes `attendance_deadline = scheduled_start_at + 15 minutes`. For
 
 Render free web services spin down after 15 minutes without traffic and can take around a minute to wake up. Render Free Postgres expires 30 days after creation; upgrade it before expiry to keep data. This setup is a temporary prototype, not production deployment.
 
-The organiser invite code and BLE secret must remain private. Authentication currently uses opaque 24-hour bearer tokens. Rate limiting, admin-controlled class rosters, password reset, refresh/revocation management, full database migrations, and hardware-backed device attestation are not yet implemented. RSSI is client-reported and cannot prove a person is inside a room.
+The organiser invite code and BLE secret must remain private. Authentication uses opaque 24-hour bearer tokens, and `POST /auth/logout` revokes the current token. The service has process-local per-IP throttles for login, registration, and BLE submission/eligibility. Shared/distributed rate limiting across multiple service instances, account recovery, revocation of all sessions, organiser-approved device replacement, and hardware-backed device attestation are not yet implemented. Versioned Alembic migrations are included. RSSI is client-reported and cannot prove a person is inside a room.
