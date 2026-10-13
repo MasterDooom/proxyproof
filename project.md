@@ -16,6 +16,25 @@ This is a prototype, not production-grade proof of physical presence. BLE RSSI i
 - API polling for live attendance (about every 3–5 seconds while a session is open); avoid WebSockets until the core flow works.
 - GitHub is the source of truth. Work in small, testable stages; do not generate a giant untested code dump.
 
+## 2A. Implementation status as of 2026-10-13
+
+Implemented in the repository:
+- FastAPI + SQLAlchemy + SQLite backend.
+- Student/organiser registration and login, PBKDF2 password hashing, 24-hour opaque bearer tokens stored as hashes, and role checks.
+- Single installation-key binding per student account.
+- Room creation/listing and student self-enrollment for the prototype.
+- Scheduled session creation with a server-computed 15-minute attendance deadline.
+- Random 6-byte per-session BLE tag plus an HMAC-derived 8-byte token rotating every 20 seconds.
+- BLE attendance submission validation: active session, deadline, room enrollment, registered device, current/previous token slot, rough RSSI threshold and one record per student/session.
+- Manual organiser corrections, student attendance history/percentage, organiser roster and session CSV export.
+- API tests and GitHub Actions workflow. CI must be green before considering this stage verified.
+
+Not yet implemented:
+- Android UI connected to the backend.
+- BLE advertising/scanning on real Android devices.
+- A real device-change approval UI/endpoint (mismatched device keys are rejected).
+- Production-grade authentication/authorisation, hardware-backed device attestation or robust inside-room proof.
+
 ## 3. Roles and core flows
 
 ### Organiser
@@ -121,36 +140,46 @@ Suggested backend modules:
 
 ## 7. Data model
 
-- User: id, display_name, email/username, password_hash, role.
-- Device: id, user_id, device_fingerprint, approved_at, is_active. Enforce one active device per student in the prototype.
-- Room: id, building, room_code, display_name, is_active.
-- RoomEnrollment: user_id, room_id, subject_label, active. Unique (user_id, room_id, subject_label).
-- AttendanceSession: id, room_id, subject_label, organiser_id, started_at, ends_at, status.
-- AttendanceToken: session_id, token_hash or verifiable token metadata, valid_from, valid_until. Do not store raw long-lived secrets in client logs.
-- AttendanceRecord: id, session_id, student_id, device_id, marked_at, method (ble or manual), rssi_at_mark, status. Unique (session_id, student_id).
+- `User`: ID, username, display name, PBKDF2 password hash, role and active flag.
+- `ApiToken`: SHA-256 hash of an opaque bearer token, user ID, expiry and creation time. Raw access tokens are returned once and not persisted.
+- `Device`: user ID, app-generated installation UUID, active flag and registration time. The current prototype permits one installation per student but does not provide device replacement approval yet.
+- `Room`: stable room ID, building, room code and display name.
+- `RoomEnrollment`: user ID, room ID and enrollment time. For the prototype, students can self-enroll in rooms; real deployment should require organiser approval or roster provisioning.
+- `AttendanceSession`: UUID, room ID, subject, scheduled start, calculated deadline, status and creation time.
+- `SessionBleTag`: random 6-byte public session tag (12 hex characters).
+- `AttendanceRecord`: session ID, student ID, device ID, marked time, method (`ble` or `manual`), reported RSSI and status. Unique constraint on `(session_id, student_id)`.
 
-Use UTC timestamps on the backend and format them locally in the app.
+The BLE token is computed as a truncated HMAC of the session ID and the current 20-second time slot; it is not stored in the database. The server accepts the current or previous slot to tolerate a rotation boundary, but never accepts new automatic attendance after the session's 15-minute deadline.
 
-## 8. API contract (initial)
+Store timestamps as UTC. SQLite stores naive UTC datetimes in this prototype; API responses convert them to timezone-aware UTC values.
 
-- POST /auth/register
-- POST /auth/login
-- POST /devices/register
-- GET /rooms
-- POST /rooms
-- POST /rooms/{room_id}/enrollments
-- GET /rooms/my
-- POST /sessions — organiser starts a session
-- POST /sessions/{session_id}/close
-- GET /sessions/active
-- GET /sessions/{session_id}/current-token — organiser app obtains the current short-lived token for BLE advertising
-- POST /attendance/ble — submit session ID, token and measured RSSI
-- POST /sessions/{session_id}/attendance/manual — organiser override
-- GET /attendance/me
-- GET /sessions/{session_id}/attendance
-- GET /attendance/export.csv
+## 8. API contract
 
-All endpoints except registration/login must require authentication. Enforce role checks server-side; never trust a role supplied by the client. Treat client-reported RSSI as a heuristic, not a cryptographic security property.
+Authentication:
+- `POST /auth/register` — register student; organiser registration requires a local invite code.
+- `POST /auth/login` — return opaque bearer token.
+- `GET /auth/me` — current authenticated user.
+
+Rooms and devices:
+- `POST /devices/register` — bind a student to one app installation key.
+- `GET /rooms` — list active rooms (authenticated).
+- `POST /rooms` — create room (organiser).
+- `POST /rooms/{room_id}/enroll` — student self-enrolls in a room (prototype flow).
+- `GET /rooms/my` — student's enrolled rooms.
+
+Sessions and attendance:
+- `POST /sessions` — organiser starts a scheduled session; server computes deadline as scheduled start + 15 minutes.
+- `GET /sessions/active` — list currently eligible sessions; student results are restricted to enrolled rooms.
+- `GET /sessions/{session_id}` — session detail.
+- `GET /sessions/{session_id}/current-token` — organiser gets compact BLE session tag and current rotating token.
+- `POST /sessions/{session_id}/close` — organiser closes session early.
+- `POST /attendance/ble` — student submits session tag, token and observed RSSI.
+- `GET /sessions/{session_id}/attendance` — organiser roster with attendance.
+- `POST /sessions/{session_id}/attendance/manual` — organiser manual correction.
+- `GET /attendance/me` — student history and percentage.
+- `GET /attendance/export.csv?session_id=...` — organiser CSV export.
+
+All endpoints except health and register/login require bearer authentication. Organiser-only operations use server-side role checks. The RSSI value is reported by the client and is not a cryptographic security property. Do not expose the prototype API publicly.
 
 ## 9. Four-day implementation plan
 
