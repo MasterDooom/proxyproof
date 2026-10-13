@@ -39,6 +39,8 @@ def upgrade() -> None:
             sa.Column("is_active", sa.Boolean(), nullable=False),
             sa.Column("created_at", sa.DateTime(), nullable=False),
         )
+    if _inspector().has_table("users"):
+        _ensure_index("ix_users_id", "users", ["id"])
         _ensure_index("ix_users_username", "users", ["username"], unique=True)
 
     if not _inspector().has_table("api_tokens"):
@@ -78,6 +80,8 @@ def upgrade() -> None:
             sa.Column("created_at", sa.DateTime(), nullable=False),
             sa.UniqueConstraint("building", "room_code", name="uq_room_building_code"),
         )
+    if _inspector().has_table("rooms"):
+        _ensure_index("ix_rooms_id", "rooms", ["id"])
 
     if not _inspector().has_table("room_enrollments"):
         op.create_table(
