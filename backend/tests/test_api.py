@@ -519,3 +519,28 @@ def test_csv_export_neutralises_spreadsheet_formulas(client: TestClient):
     assert response.status_code == 200
     assert "'=HYPERLINK" in response.text
     assert "'=1+1" in response.text
+
+def test_future_session_is_visible_to_owner_but_not_student(client: TestClient):
+    organiser = register_user(client, "scheduled_teacher", role="organiser")
+    student = register_user(client, "scheduled_student")
+    room_id = create_room(client, organiser, "701")
+    enroll(client, student, room_id)
+    future_session = create_session(
+        client,
+        organiser,
+        room_id,
+        start_offset_minutes=5,
+        subject="Scheduled Class",
+    )
+    assert future_session.status_code == 201, future_session.text
+    session_id = future_session.json()["id"]
+
+    owner_sessions = client.get("/sessions/active", headers=organiser["headers"])
+    assert owner_sessions.status_code == 200
+    assert session_id in {item["id"] for item in owner_sessions.json()}
+    owner_item = next(item for item in owner_sessions.json() if item["id"] == session_id)
+    assert owner_item["attendance_open"] is False
+
+    student_sessions = client.get("/sessions/active", headers=student["headers"])
+    assert student_sessions.status_code == 200
+    assert session_id not in {item["id"] for item in student_sessions.json()}
