@@ -263,27 +263,29 @@ def register_device(
 @app.get("/rooms", response_model=list[RoomOut])
 def list_rooms(
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[Room]:
-    return list(
-        db.scalars(
-            select(Room)
-            .where(Room.is_active.is_(True))
-            .order_by(Room.building, Room.room_code)
+    query = select(Room).where(Room.is_active.is_(True))
+    if user.role == "organiser":
+        # Legacy unowned rooms remain visible for migration/compatibility; newly
+        # created rooms are listed only to their owner.
+        query = query.where(
+            or_(Room.created_by_user_id == user.id, Room.created_by_user_id.is_(None))
         )
-    )
+    return list(db.scalars(query.order_by(Room.building, Room.room_code)))
 
 
 @app.post("/rooms", response_model=RoomOut, status_code=status.HTTP_201_CREATED)
 def create_room(
     payload: RoomCreate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_role("organiser")),
+    user: User = Depends(require_role("organiser")),
 ) -> Room:
     room = Room(
         building=payload.building.strip(),
         room_code=payload.room_code.strip(),
         display_name=payload.display_name.strip(),
+        created_by_user_id=user.id,
     )
     db.add(room)
     try:
@@ -355,6 +357,11 @@ def create_session(
     room = db.get(Room, payload.room_id)
     if room is None or not room.is_active:
         raise HTTPException(status_code=404, detail="Active room not found.")
+    if room.created_by_user_id is not None and room.created_by_user_id != _user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorised to create sessions for this room.",
+        )
 
     scheduled_aware = payload.scheduled_start_at.astimezone(timezone.utc)
     now = datetime.now(timezone.utc)
