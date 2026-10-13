@@ -20,7 +20,7 @@ jobs:
           BASE_URL: https://proxyproof-api.onrender.com
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 36); do
+          for attempt in $(seq 1 72); do
             if curl --connect-timeout 5 --max-time 10 --fail --silent --show-error "$BASE_URL/health" --output /tmp/health.json; then
               if python - <<'PY'
           import json
@@ -38,7 +38,7 @@ jobs:
                 break
               fi
             fi
-            if [ "$attempt" -eq 36 ]; then
+            if [ "$attempt" -eq 72 ]; then
               echo "Health endpoint did not become available with the current health schema."
               exit 1
             fi
