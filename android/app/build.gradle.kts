@@ -6,7 +6,7 @@ plugins {
 android {
     namespace = "com.masterdooom.proxyproof"
     compileSdk {
-        version = release(37)
+        version = release(36)
     }
 
     defaultConfig {
