@@ -15,7 +15,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from .config import is_production_environment, required_secret
+from .config import required_secret
 from .database import get_db
 from .models import ApiToken, User
 
