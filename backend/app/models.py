@@ -89,6 +89,11 @@ class AttendanceSession(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     room_id: Mapped[int] = mapped_column(ForeignKey("rooms.id"), nullable=False, index=True)
+    # Nullable only for rows created by the pre-ownership prototype; new sessions
+    # always record an organiser owner. Legacy ownerless rows are not modifiable.
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
     subject_label: Mapped[str] = mapped_column(String(120), nullable=False)
     scheduled_start_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     attendance_deadline: Mapped[datetime] = mapped_column(DateTime, nullable=False)
