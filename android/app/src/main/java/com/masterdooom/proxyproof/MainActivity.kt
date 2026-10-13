@@ -26,6 +26,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -351,7 +352,11 @@ private fun LoginScreen(
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                "Emulator default: 10.0.2.2. On your phone, enter your laptop's Wi-Fi IPv4 address. Keep the backend running.",
+                if (apiBase.startsWith("https://")) {
+                    "Hosted HTTPS works over Wi-Fi or mobile data. Use a local URL only for development."
+                } else {
+                    "Local development only: emulator uses 10.0.2.2; a physical phone needs your computer's LAN IP and the local backend running."
+                },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
                 lineHeight = 17.sp
@@ -448,10 +453,38 @@ private fun LoginScreen(
         }
         Spacer(Modifier.height(18.dp))
         Text(
-            "Prototype build · BLE attendance is the next integration stage",
+            "Internal testing · foreground BLE requires nearby-device permission and compatible hardware",
             modifier = Modifier.fillMaxWidth(),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 11.sp
+        )
+        PrivacyNoticeLink()
+    }
+}
+
+@Composable
+private fun PrivacyNoticeLink() {
+    var visible by remember { mutableStateOf(false) }
+    TextButton(
+        onClick = { visible = true },
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text("Privacy & prototype limitations")
+    }
+    if (visible) {
+        AlertDialog(
+            onDismissRequest = { visible = false },
+            title = { Text("Privacy & limitations") },
+            text = {
+                Text(
+                    "ProxyProof stores your username, display name, app-installation ID, room enrolments, and attendance status/time/method. For successful BLE attendance, the server also stores the signal strength reported by the phone. Passwords are hashed on the server; this app encrypts its saved access token with Android Keystore.\n\n" +
+                        "Organisers can view rosters and export records for sessions they own. The app does not collect GPS coordinates. Android 8–11 may require location permission for BLE scanning, but that permission is requested to satisfy Android's BLE requirements.\n\n" +
+                        "Records remain until a database operator deletes them; self-service account deletion is not implemented. BLE signal strength cannot prove with certainty that you are inside a classroom. This is a foreground-only internal testing build."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { visible = false }) { Text("Close") }
+            }
         )
     }
 }
