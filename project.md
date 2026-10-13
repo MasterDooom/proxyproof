@@ -27,7 +27,7 @@ Implemented in the repository:
 - Random 6-byte per-session BLE tag plus an HMAC-derived 8-byte token rotating every 20 seconds.
 - BLE attendance submission validation: active session, deadline, room enrollment, registered device, current/previous token slot, rough RSSI threshold and one record per student/session.
 - Manual organiser corrections, student attendance history/percentage, organiser roster and session CSV export.
-- API tests and GitHub Actions workflow. CI must be green before considering this stage verified.
+- API tests and GitHub Actions workflow; 13 tests passed in CI on 2026-10-13 (run: https://github.com/MasterDooom/proxyproof/actions/runs/38371533680).
 
 Not yet implemented:
 - Android UI connected to the backend.
