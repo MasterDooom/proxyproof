@@ -133,6 +133,13 @@ def require_room_enrollment(student_id: int, room_id: int, db: Session) -> RoomE
     return enrollment
 
 
+def csv_safe_cell(value):
+    """Neutralise spreadsheet formula injection in CSV string fields."""
+    if isinstance(value, str) and value.lstrip(" \\t\\r\\n").startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
 def roster_item(
     student: User,
     record: AttendanceRecord | None,
@@ -690,15 +697,15 @@ def export_attendance_csv(
             continue
         record = records.get(student_id)
         writer.writerow([
-            user.id,
-            user.username,
-            user.display_name,
-            session.room.display_name,
-            session.subject_label,
-            record.status if record else "absent",
-            record.method if record else "",
-            as_utc(record.marked_at).isoformat() if record else "",
-            record.rssi_at_mark if record and record.rssi_at_mark is not None else "",
+            csv_safe_cell(user.id),
+            csv_safe_cell(user.username),
+            csv_safe_cell(user.display_name),
+            csv_safe_cell(session.room.display_name),
+            csv_safe_cell(session.subject_label),
+            csv_safe_cell(record.status if record else "absent"),
+            csv_safe_cell(record.method if record else ""),
+            csv_safe_cell(as_utc(record.marked_at).isoformat() if record else ""),
+            csv_safe_cell(record.rssi_at_mark if record and record.rssi_at_mark is not None else ""),
         ])
     filename = f"proxyproof-{session.room.room_code}-{session.id[:8]}.csv"
     return Response(
