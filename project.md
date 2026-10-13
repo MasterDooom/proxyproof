@@ -164,7 +164,8 @@ Store timestamps as UTC. SQLite stores naive UTC datetimes in this prototype; AP
 Authentication:
 - `POST /auth/register` — register student; organiser registration requires a local invite code.
 - `POST /auth/login` — return opaque bearer token.
-- `GET /auth/me` — current authenticated user.
+- `GET /auth/me` — current authenticated user
+- `POST /auth/logout` — revoke the current bearer token.
 
 Rooms and devices:
 - `POST /devices/register` — bind a student to one app installation key.
@@ -175,7 +176,8 @@ Rooms and devices:
 
 Sessions and attendance:
 - `POST /sessions` — organiser starts a scheduled session; server computes deadline as scheduled start + 15 minutes.
-- `GET /sessions/active` — list currently eligible sessions; student results are restricted to enrolled rooms.
+- `GET /sessions/active` — list currently eligible sessions; student results are restricted to enrolled rooms and organisers see their own scheduled/live sessions
+- `GET /sessions/my` — recent and historical sessions owned by the organiser.
 - `GET /sessions/{session_id}` — session detail.
 - `GET /sessions/{session_id}/current-token` — organiser gets compact BLE session tag and current rotating token.
 - `POST /sessions/{session_id}/close` — organiser closes session early.
