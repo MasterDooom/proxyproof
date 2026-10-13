@@ -35,91 +35,350 @@ def client():
     app.dependency_overrides.clear()
 
 
-def create_room(client: TestClient) -> int:
+def register_user(
+    client: TestClient,
+    username: str,
+    role: str = "student",
+    password: str = "correct-horse-123",
+) -> dict:
+    payload = {
+        "username": username,
+        "display_name": username.title(),
+        "password": password,
+        "role": role,
+    }
+    if role == "organiser":
+        payload["organiser_invite_code"] = "local-demo-organiser-code"
+    response = client.post("/auth/register", json=payload)
+    assert response.status_code == 201, response.text
+    data = response.json()
+    return {
+        "user": data["user"],
+        "token": data["access_token"],
+        "headers": {"Authorization": f"Bearer {data['access_token']}"},
+    }
+
+
+def create_room(client: TestClient, organiser: dict, room_code: str = "301") -> int:
     response = client.post(
         "/rooms",
-        json={"building": "AB1", "room_code": "301", "display_name": "AB1-301"},
+        headers=organiser["headers"],
+        json={
+            "building": "AB1",
+            "room_code": room_code,
+            "display_name": f"AB1-{room_code}",
+        },
     )
-    assert response.status_code == 201
+    assert response.status_code == 201, response.text
     return response.json()["id"]
 
 
-def iso_utc(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat()
+def enroll(client: TestClient, student: dict, room_id: int):
+    response = client.post(
+        f"/rooms/{room_id}/enroll",
+        headers=student["headers"],
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def register_device(client: TestClient, student: dict, device_key: str = "test-device-123456"):
+    response = client.post(
+        "/devices/register",
+        headers=student["headers"],
+        json={"device_key": device_key},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def create_session(client: TestClient, organiser: dict, room_id: int, start_offset_minutes: int = -2, subject: str = "Engineering Mathematics"):
+    scheduled_start = datetime.now(timezone.utc) + timedelta(minutes=start_offset_minutes)
+    response = client.post(
+        "/sessions",
+        headers=organiser["headers"],
+        json={
+            "room_id": room_id,
+            "subject_label": subject,
+            "scheduled_start_at": scheduled_start.isoformat(),
+        },
+    )
+    return response
+
+
+def get_ble_advertisement(client: TestClient, organiser: dict, session_id: str):
+    response = client.get(
+        f"/sessions/{session_id}/current-token",
+        headers=organiser["headers"],
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def test_health(client: TestClient):
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    assert response.json() == {"status": "ok", "service": "proxyproof-api"}
 
 
-def test_create_and_list_room(client: TestClient):
-    room_id = create_room(client)
-    response = client.get("/rooms")
-    assert response.status_code == 200
-    assert response.json()[0]["id"] == room_id
-
-
-def test_duplicate_room_code_is_rejected(client: TestClient):
-    create_room(client)
-    response = client.post(
+def test_room_endpoints_require_authentication(client: TestClient):
+    assert client.get("/rooms").status_code == 401
+    assert client.post(
         "/rooms",
-        json={"building": "AB1", "room_code": "301", "display_name": "Duplicate room"},
-    )
-    assert response.status_code == 409
+        json={"building": "AB1", "room_code": "301", "display_name": "AB1-301"},
+    ).status_code == 401
 
 
-def test_attendance_window_is_fifteen_minutes(client: TestClient):
-    room_id = create_room(client)
-    scheduled_start = datetime.now(timezone.utc) - timedelta(minutes=2)
-    response = client.post(
-        "/sessions",
+def test_registration_login_and_organiser_invite(client: TestClient):
+    denied = client.post(
+        "/auth/register",
         json={
-            "room_id": room_id,
-            "subject_label": "Engineering Mathematics",
-            "scheduled_start_at": iso_utc(scheduled_start),
+            "username": "fakeorganiser",
+            "display_name": "Fake Organiser",
+            "password": "correct-horse-123",
+            "role": "organiser",
+            "organiser_invite_code": "wrong",
         },
     )
-    assert response.status_code == 201
-    data = response.json()
-    start = datetime.fromisoformat(data["scheduled_start_at"])
-    deadline = datetime.fromisoformat(data["attendance_deadline"])
-    assert (deadline - start) == timedelta(minutes=15)
-    assert data["attendance_open"] is True
-    assert len(client.get("/sessions/active").json()) == 1
+    assert denied.status_code == 403
+
+    student = register_user(client, "alice")
+    login = client.post(
+        "/auth/login",
+        json={"username": "ALICE", "password": "correct-horse-123"},
+    )
+    assert login.status_code == 200
+    assert login.json()["user"]["username"] == "alice"
+    assert client.get("/auth/me", headers=student["headers"]).json()["role"] == "student"
+
+    bad_login = client.post(
+        "/auth/login",
+        json={"username": "alice", "password": "wrong-password"},
+    )
+    assert bad_login.status_code == 401
 
 
-def test_session_outside_attendance_window_is_rejected(client: TestClient):
-    room_id = create_room(client)
-    scheduled_start = datetime.now(timezone.utc) - timedelta(minutes=20)
-    response = client.post(
-        "/sessions",
+def test_student_cannot_create_room_and_duplicate_room_is_rejected(client: TestClient):
+    student = register_user(client, "alice")
+    organiser = register_user(client, "teacher", role="organiser")
+
+    forbidden = client.post(
+        "/rooms",
+        headers=student["headers"],
+        json={"building": "AB1", "room_code": "301", "display_name": "AB1-301"},
+    )
+    assert forbidden.status_code == 403
+
+    create_room(client, organiser)
+    duplicate = client.post(
+        "/rooms",
+        headers=organiser["headers"],
+        json={"building": "AB1", "room_code": "301", "display_name": "Duplicate"},
+    )
+    assert duplicate.status_code == 409
+
+
+def test_student_device_is_bound_to_one_installation(client: TestClient):
+    student = register_user(client, "alice")
+    register_device(client, student)
+    duplicate_same_device = client.post(
+        "/devices/register",
+        headers=student["headers"],
+        json={"device_key": "test-device-123456"},
+    )
+    assert duplicate_same_device.status_code == 201
+    other_device = client.post(
+        "/devices/register",
+        headers=student["headers"],
+        json={"device_key": "different-device-654321"},
+    )
+    assert other_device.status_code == 409
+
+
+def test_valid_ble_attendance_and_duplicate_rejection(client: TestClient):
+    student = register_user(client, "alice")
+    organiser = register_user(client, "teacher", role="organiser")
+    room_id = create_room(client, organiser)
+    enroll(client, student, room_id)
+    register_device(client, student)
+    created = create_session(client, organiser, room_id)
+    assert created.status_code == 201, created.text
+    session = created.json()
+
+    advertisement = get_ble_advertisement(client, organiser, session["id"])
+    payload = {
+        "session_tag": advertisement["session_tag"],
+        "token": advertisement["token"],
+        "rssi": -55,
+    }
+    marked = client.post("/attendance/ble", headers=student["headers"], json=payload)
+    assert marked.status_code == 200, marked.text
+    assert marked.json()["status"] == "present"
+    assert marked.json()["session_id"] == session["id"]
+
+    duplicate = client.post("/attendance/ble", headers=student["headers"], json=payload)
+    assert duplicate.status_code == 409
+
+    history = client.get("/attendance/me", headers=student["headers"])
+    assert history.status_code == 200
+    assert len(history.json()["items"]) == 1
+    assert history.json()["items"][0]["status"] == "present"
+
+
+def test_wrong_room_or_missing_device_is_rejected(client: TestClient):
+    student = register_user(client, "alice")
+    organiser = register_user(client, "teacher", role="organiser")
+    room_id = create_room(client, organiser)
+    session = create_session(client, organiser, room_id).json()
+    advertisement = get_ble_advertisement(client, organiser, session["id"])
+
+    # The student has no room enrolment and no registered phone.
+    no_enrollment = client.post(
+        "/attendance/ble",
+        headers=student["headers"],
         json={
-            "room_id": room_id,
-            "subject_label": "Physics",
-            "scheduled_start_at": iso_utc(scheduled_start),
+            "session_tag": advertisement["session_tag"],
+            "token": advertisement["token"],
+            "rssi": -50,
         },
     )
-    assert response.status_code == 422
-    assert "window" in response.json()["detail"].lower()
+    assert no_enrollment.status_code == 409  # device registration is checked first
 
-
-def test_closed_session_is_removed_from_active_list(client: TestClient):
-    room_id = create_room(client)
-    scheduled_start = datetime.now(timezone.utc) - timedelta(minutes=1)
-    created = client.post(
-        "/sessions",
+    register_device(client, student)
+    wrong_room = client.post(
+        "/attendance/ble",
+        headers=student["headers"],
         json={
-            "room_id": room_id,
-            "subject_label": "Physics",
-            "scheduled_start_at": iso_utc(scheduled_start),
+            "session_tag": advertisement["session_tag"],
+            "token": advertisement["token"],
+            "rssi": -50,
         },
     )
-    assert created.status_code == 201
-    session_id = created.json()["id"]
+    assert wrong_room.status_code == 403
 
-    closed = client.post(f"/sessions/{session_id}/close")
+
+def test_weak_signal_and_invalid_token_are_rejected(client: TestClient):
+    student = register_user(client, "alice")
+    organiser = register_user(client, "teacher", role="organiser")
+    room_id = create_room(client, organiser)
+    enroll(client, student, room_id)
+    register_device(client, student)
+    session = create_session(client, organiser, room_id).json()
+    advertisement = get_ble_advertisement(client, organiser, session["id"])
+
+    invalid = client.post(
+        "/attendance/ble",
+        headers=student["headers"],
+        json={"session_tag": advertisement["session_tag"], "token": "0" * 16, "rssi": -50},
+    )
+    assert invalid.status_code == 401
+
+    weak = client.post(
+        "/attendance/ble",
+        headers=student["headers"],
+        json={
+            "session_tag": advertisement["session_tag"],
+            "token": advertisement["token"],
+            "rssi": -110,
+        },
+    )
+    assert weak.status_code == 422
+
+
+def test_fifteen_minute_cutoff_is_enforced(client: TestClient):
+    organiser = register_user(client, "teacher", role="organiser")
+    room_id = create_room(client, organiser)
+    too_late = create_session(client, organiser, room_id, start_offset_minutes=-20)
+    assert too_late.status_code == 422
+    assert "window" in too_late.json()["detail"].lower()
+
+
+def test_simultaneous_room_sessions_remain_separate(client: TestClient):
+    student = register_user(client, "alice")
+    organiser = register_user(client, "teacher", role="organiser")
+    room_one = create_room(client, organiser, "301")
+    room_two = create_room(client, organiser, "302")
+    enroll(client, student, room_one)
+    register_device(client, student)
+
+    session_one = create_session(client, organiser, room_one, subject="Math").json()
+    session_two = create_session(client, organiser, room_two, subject="Physics").json()
+    ad_one = get_ble_advertisement(client, organiser, session_one["id"])
+    ad_two = get_ble_advertisement(client, organiser, session_two["id"])
+    assert ad_one["session_tag"] != ad_two["session_tag"]
+
+    active = client.get("/sessions/active", headers=student["headers"])
+    assert active.status_code == 200
+    assert [item["id"] for item in active.json()] == [session_one["id"]]
+
+    marked = client.post(
+        "/attendance/ble",
+        headers=student["headers"],
+        json={
+            "session_tag": ad_one["session_tag"],
+            "token": ad_one["token"],
+            "rssi": -55,
+        },
+    )
+    assert marked.status_code == 200
+    wrong_room = client.post(
+        "/attendance/ble",
+        headers=student["headers"],
+        json={
+            "session_tag": ad_two["session_tag"],
+            "token": ad_two["token"],
+            "rssi": -45,
+        },
+    )
+    assert wrong_room.status_code == 403
+
+
+def test_manual_attendance_roster_and_csv(client: TestClient):
+    student = register_user(client, "alice")
+    organiser = register_user(client, "teacher", role="organiser")
+    room_id = create_room(client, organiser)
+    enroll(client, student, room_id)
+    session = create_session(client, organiser, room_id).json()
+
+    manual = client.post(
+        f"/sessions/{session['id']}/attendance/manual",
+        headers=organiser["headers"],
+        json={"student_id": student["user"]["id"], "status": "present"},
+    )
+    assert manual.status_code == 200, manual.text
+    assert manual.json()["method"] == "manual"
+
+    roster = client.get(
+        f"/sessions/{session['id']}/attendance",
+        headers=organiser["headers"],
+    )
+    assert roster.status_code == 200
+    assert roster.json()["present_count"] == 1
+
+    export = client.get(
+        "/attendance/export.csv",
+        headers=organiser["headers"],
+        params={"session_id": session["id"]},
+    )
+    assert export.status_code == 200
+    assert "alice" in export.text
+    assert "present" in export.text
+
+
+def test_closed_session_rejects_ble_attendance(client: TestClient):
+    student = register_user(client, "alice")
+    organiser = register_user(client, "teacher", role="organiser")
+    room_id = create_room(client, organiser)
+    enroll(client, student, room_id)
+    register_device(client, student)
+    session = create_session(client, organiser, room_id).json()
+    ad = get_ble_advertisement(client, organiser, session["id"])
+    closed = client.post(f"/sessions/{session['id']}/close", headers=organiser["headers"])
     assert closed.status_code == 200
-    assert closed.json()["status"] == "closed"
-    assert client.get("/sessions/active").json() == []
+
+    attendance = client.post(
+        "/attendance/ble",
+        headers=student["headers"],
+        json={"session_tag": ad["session_tag"], "token": ad["token"], "rssi": -55},
+    )
+    assert attendance.status_code == 409
