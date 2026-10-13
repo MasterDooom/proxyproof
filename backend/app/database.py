@@ -9,6 +9,8 @@ from collections.abc import Generator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+from .config import is_production_environment
+
 
 def normalize_database_url(raw_url: str) -> str:
     """Return a SQLAlchemy URL using psycopg for PostgreSQL."""
@@ -20,9 +22,13 @@ def normalize_database_url(raw_url: str) -> str:
     return value
 
 
-DATABASE_URL = normalize_database_url(
-    os.getenv("DATABASE_URL", "sqlite:///./proxyproof.db")
-)
+raw_database_url = os.getenv("DATABASE_URL", "").strip()
+if is_production_environment() and not raw_database_url:
+    raise RuntimeError(
+        "DATABASE_URL is required in production; refusing to use ephemeral SQLite storage."
+    )
+
+DATABASE_URL = normalize_database_url(raw_database_url or "sqlite:///./proxyproof.db")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
 engine = create_engine(
