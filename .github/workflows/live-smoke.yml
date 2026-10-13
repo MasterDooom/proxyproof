@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/live-smoke.yml"
+      - "backend/**"
+      - "android/**"
+      - "render.yaml"
   workflow_dispatch:
 
 jobs:
@@ -19,10 +22,24 @@ jobs:
           set -euo pipefail
           for attempt in $(seq 1 36); do
             if curl --connect-timeout 5 --max-time 10 --fail --silent --show-error "$BASE_URL/health" --output /tmp/health.json; then
-              break
+              if python - <<'PY'
+          import json
+          try:
+              with open("/tmp/health.json", encoding="utf-8") as handle:
+                  response = json.load(handle)
+              assert response.get("status") == "ok"
+              assert response.get("service") == "proxyproof-api"
+              assert response.get("storage_backend") in {"sqlite", "postgresql"}
+              assert "storage_warning" in response
+          except Exception:
+              raise SystemExit(1)
+          PY
+              then
+                break
+              fi
             fi
             if [ "$attempt" -eq 36 ]; then
-              echo "Health endpoint did not become available."
+              echo "Health endpoint did not become available with the current health schema."
               exit 1
             fi
             sleep 5
