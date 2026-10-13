@@ -938,6 +938,7 @@ private fun DashboardScreen(
                     Text(if (loading) "Syncing…" else "Refresh")
                 }
             }
+            PrivacyNoticeLink()
         }
 
         if (message.isNotBlank()) {
