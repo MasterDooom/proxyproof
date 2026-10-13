@@ -893,7 +893,18 @@ private fun DashboardScreen(
                 onAuthExpired()
                 return@LaunchedEffect
             }
-            bleMessage = error.message ?: "Could not start BLE advertising."
+            val detail = error.message.orEmpty()
+            if (
+                detail.contains("outside the 15-minute attendance window", ignoreCase = true) &&
+                OffsetDateTime.now().isBefore(attendanceDeadline)
+            ) {
+                // Device/server clocks can differ by a few seconds at the exact
+                // scheduled start; retry within the still-open class window.
+                bleMessage = "Waiting for the server's attendance window to open…"
+                delay(1_000)
+                continue
+            }
+            bleMessage = detail.ifBlank { "Could not start BLE advertising." }
             isBroadcasting = false
         } finally {
             advertiser.stop()
