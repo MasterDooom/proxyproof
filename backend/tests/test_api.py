@@ -469,3 +469,24 @@ def test_organiser_can_only_manage_their_own_sessions(client: TestClient):
         f"/sessions/{session_id}/close",
         headers=owner["headers"],
     ).status_code == 200
+
+def test_organisers_cannot_create_sessions_for_another_organisers_room(client: TestClient):
+    first = register_user(client, "first_organiser", role="organiser")
+    second = register_user(client, "second_organiser", role="organiser")
+    first_room_id = create_room(client, first, "501")
+    second_room_id = create_room(client, second, "502")
+
+    first_rooms = {
+        row["id"] for row in client.get("/rooms", headers=first["headers"]).json()
+    }
+    second_rooms = {
+        row["id"] for row in client.get("/rooms", headers=second["headers"]).json()
+    }
+    assert first_room_id in first_rooms
+    assert second_room_id not in first_rooms
+    assert second_room_id in second_rooms
+    assert first_room_id not in second_rooms
+
+    assert create_session(client, first, first_room_id).status_code == 201
+    assert create_session(client, second, second_room_id).status_code == 201
+    assert create_session(client, first, second_room_id).status_code == 403
