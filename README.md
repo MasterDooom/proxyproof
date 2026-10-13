@@ -33,12 +33,14 @@ The intended API/database region is Singapore. The app normalises Render's Postg
 
 The Blueprint uses free Render plans to avoid committing you to a bill. Free web services can spin down after 15 minutes of inactivity and take around a minute to wake up. Free Render Postgres databases expire 30 days after creation; upgrade the database before expiry to retain stored accounts and attendance. See [Render's free service limitations](https://render.com/docs/free). This is fine for a short demo, not durable production hosting.
 
+See [PRIVACY.md](PRIVACY.md) for the data collected, permissions, retention limitations and prototype presence-verification limits.
+
 ## Point the Android app at Render
 
 1. Install the latest APK from [Android APK workflow runs](https://github.com/MasterDooom/proxyproof/actions/workflows/android-apk.yml). Open the latest successful run and download artifact `proxyproof-debug-apk`; extract the ZIP to get `app-debug.apk`.
 2. On the login/register screen, paste the public Render URL into **API server URL**, e.g. `https://proxyproof-api.onrender.com` (use the actual URL shown on your service).
 3. Create an organiser account using the invite code you set during Blueprint creation, then create a room.
-4. Sign out, create a student account, join that room, register the phone, then sign in as organiser again and test session/roster/manual attendance.
+4. Sign out, create a student account, join that room, register the phone, then sign in as organiser again and test session/roster/manual attendance, session history, and CSV export.
 5. For automatic attendance, keep the organiser's session screen in the foreground and start BLE broadcast; on a second phone, open student attendance scanning. Grant nearby-device permissions and verify the server confirms the record. If the phone does not support BLE advertising, use manual organiser attendance as a labelled fallback.
 
 HTTPS means the phone can connect over Wi-Fi or mobile data; the laptop does not need to run the backend after Render is deployed.
@@ -73,6 +75,6 @@ Local development uses SQLite unless `DATABASE_URL` is set. Render uses Postgres
 
 ## Current functional scope and limitations
 
-The readiness branch adds foreground BLE advertising and scanning, a shared 14-byte packet codec, token refresh, repeated-observation/dwell checks, ambiguous-room messaging, and server-side submission. A GitHub Actions build succeeded for the current BLE/Keystore code, but physical two-phone BLE validation is still outstanding. Keep the app in the foreground; background attendance is not claimed.
+The readiness branch adds foreground BLE advertising and scanning, a shared 14-byte packet codec, token refresh, repeated-observation/dwell checks, ambiguous-room messaging, server-side submission, organiser-owned session history, and a system file-picker flow for saving CSV exports. A GitHub Actions build succeeded for the current BLE/Keystore code, but physical two-phone BLE validation is still outstanding. Keep the app in the foreground; background attendance is not claimed.
 
 The rotating-token endpoint feeds the Android BLE advertiser. The current development BLE manufacturer identifier (`0xFFFF`) is explicitly not suitable for public release; replace it with an appropriate assigned/approved identifier. RSSI is only a rough proximity heuristic and cannot prove that a student crossed the classroom door. Device binding uses a random app-installation UUID, not hardware-backed attestation. Room/session organiser ownership and fail-closed production configuration have been added on the readiness branch, with Alembic migrations that are covered by CI. Rate limiting, account recovery, durable production hosting and physical BLE validation remain release gates.
