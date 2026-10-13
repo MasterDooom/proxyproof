@@ -11,7 +11,7 @@ import javax.crypto.KeyGenerator
 import android.security.keystore.KeyGenParameterSpec
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.KeyProperties
+import android.security.keystore.KeyProperties
 
 /**
  * Small AES-GCM token store backed by an Android Keystore key.
