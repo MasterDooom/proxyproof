@@ -905,16 +905,36 @@ private fun DashboardScreen(
                     val latest = candidate.second.last()
                     bleMessage = "Validating presence for a nearby room…"
                     try {
+                        val candidatePayload = JSONObject()
+                            .put("session_tag", latest.sessionTag)
+                            .put("token", latest.token)
+                            .put("rssi", latest.rssi)
+
+                        val eligibility = JSONObject(
+                            ApiClient.request(
+                                apiBase,
+                                "POST",
+                                "/attendance/ble/eligibility",
+                                token,
+                                candidatePayload
+                            )
+                        )
+                        if (!eligibility.optBoolean("eligible", false)) {
+                            successfulTags.add(tag)
+                            scanner.stop()
+                            isScanning = false
+                            bleMessage = "Attendance was already recorded for ${eligibility.optString("subject_label")} · ${eligibility.optString("room_name")}."
+                            loadData()
+                            return@launch
+                        }
+
                         val result = JSONObject(
                             ApiClient.request(
                                 apiBase,
                                 "POST",
                                 "/attendance/ble",
                                 token,
-                                JSONObject()
-                                    .put("session_tag", latest.sessionTag)
-                                    .put("token", latest.token)
-                                    .put("rssi", latest.rssi)
+                                candidatePayload
                             )
                         )
                         successfulTags.add(tag)
