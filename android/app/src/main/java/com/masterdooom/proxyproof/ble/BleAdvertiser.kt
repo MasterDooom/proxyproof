@@ -23,8 +23,9 @@ class BleAdvertiser(context: Context) {
             return false
         }
         val adapter = runCatching { manager.adapter }.getOrNull() ?: return false
-        return runCatching { adapter.isEnabled && adapter.isMultipleAdvertisementSupported && adapter.bluetoothLeAdvertiser != null }
-            .getOrDefault(false)
+        // Only a single non-connectable advertisement is active at a time; multi-advertising
+        // support is not required for this prototype.
+        return runCatching { adapter.bluetoothLeAdvertiser != null }.getOrDefault(false)
     }
 
     @Synchronized
@@ -36,10 +37,6 @@ class BleAdvertiser(context: Context) {
                 ?: run { onStatus("Bluetooth is not available on this device."); return }
             if (!adapter.isEnabled) {
                 onStatus("Bluetooth is turned off.")
-                return
-            }
-            if (!adapter.isMultipleAdvertisementSupported) {
-                onStatus("This device does not support BLE advertising.")
                 return
             }
             val advertiser = adapter.bluetoothLeAdvertiser
