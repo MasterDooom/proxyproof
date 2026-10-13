@@ -37,7 +37,7 @@ The Blueprint defines:
 
 Wait for deployment to finish and test `https://YOUR-SERVICE.onrender.com/health`. The health check executes `SELECT 1` against the configured database. If it fails, check the deploy logs and Render environment settings.
 
-The database URL is normalised from Render's `postgresql://` format to `postgresql+psycopg://`; `psycopg[binary]` is installed from requirements. Local development defaults to SQLite. Hosted deployments refuse to start without `DATABASE_URL` instead of silently using ephemeral SQLite. Versioned Alembic migrations run before Uvicorn starts; the baseline migration adopts existing prototype tables without dropping them, and a second migration adds session ownership safely.
+The database URL is normalised from Render's `postgresql://` format to `postgresql+psycopg://`; `psycopg[binary]` is installed from requirements. Local development defaults to SQLite. Hosted deployments refuse to start without `DATABASE_URL` instead of silently using ephemeral SQLite. Versioned Alembic migrations run before Uvicorn starts; the baseline migration adopts existing prototype tables without dropping them, and additive migrations add session and room ownership safely.
 
 ## API happy path
 
@@ -60,4 +60,4 @@ The server computes `attendance_deadline = scheduled_start_at + 15 minutes`. For
 
 Render free web services spin down after 15 minutes without traffic and can take around a minute to wake up. Render Free Postgres expires 30 days after creation; upgrade it before expiry to keep data. This setup is a temporary prototype, not production deployment.
 
-The organiser invite code and BLE secret must remain private. Authentication currently uses opaque 24-hour bearer tokens. Rate limiting, admin-controlled class rosters, password reset, refresh/revocation management, full database migrations, and hardware-backed device attestation are not yet implemented. RSSI is client-reported and cannot prove a person is inside a room.
+The organiser invite code and BLE secret must remain private. Authentication currently uses opaque 24-hour bearer tokens. Per-route rate limiting, account recovery, advanced token revocation management, organiser-approved device replacement, and hardware-backed device attestation are not yet implemented. Versioned Alembic migrations are included. RSSI is client-reported and cannot prove a person is inside a room.
