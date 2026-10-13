@@ -571,3 +571,26 @@ def test_logout_revokes_only_the_current_access_token(client: TestClient):
 
     other = register_user(client, "logout_other_student")
     assert client.get("/auth/me", headers=other["headers"]).status_code == 200
+
+def test_organiser_session_history_includes_closed_sessions_and_is_owner_scoped(client: TestClient):
+    owner = register_user(client, "history_owner", role="organiser")
+    other = register_user(client, "history_other", role="organiser")
+    room_id = create_room(client, owner, "801")
+    response = create_session(client, owner, room_id, subject="Past session")
+    assert response.status_code == 201, response.text
+    session_id = response.json()["id"]
+    close = client.post(
+        f"/sessions/{session_id}/close",
+        headers=owner["headers"],
+    )
+    assert close.status_code == 200
+
+    history = client.get("/sessions/my", headers=owner["headers"])
+    assert history.status_code == 200
+    assert [item["id"] for item in history.json()] == [session_id]
+    assert history.json()[0]["status"] == "closed"
+
+    other_history = client.get("/sessions/my", headers=other["headers"])
+    assert other_history.status_code == 200
+    assert session_id not in {item["id"] for item in other_history.json()}
+    assert client.get("/sessions/my", headers=register_user(client, "history_student")["headers"]).status_code == 403
