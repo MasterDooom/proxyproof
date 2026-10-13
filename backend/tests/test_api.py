@@ -594,3 +594,42 @@ def test_organiser_session_history_includes_closed_sessions_and_is_owner_scoped(
     assert other_history.status_code == 200
     assert session_id not in {item["id"] for item in other_history.json()}
     assert client.get("/sessions/my", headers=register_user(client, "history_student")["headers"]).status_code == 403
+
+def test_ble_eligibility_is_read_only_and_detects_existing_attendance(client: TestClient):
+    student = register_user(client, "eligibility_student")
+    organiser = register_user(client, "eligibility_teacher", role="organiser")
+    room_id = create_room(client, organiser)
+    enroll(client, student, room_id)
+    register_device(client, student)
+    session = create_session(client, organiser, room_id, subject="Eligibility Test").json()
+    ad = get_ble_advertisement(client, organiser, session["id"])
+    payload = {"session_tag": ad["session_tag"], "token": ad["token"], "rssi": -54}
+
+    eligibility = client.post(
+        "/attendance/ble/eligibility",
+        headers=student["headers"],
+        json=payload,
+    )
+    assert eligibility.status_code == 200, eligibility.text
+    assert eligibility.json()["eligible"] is True
+    assert eligibility.json()["already_marked"] is False
+    assert eligibility.json()["session_id"] == session["id"]
+    assert eligibility.json()["room_name"]
+    assert eligibility.json()["subject_label"] == "Eligibility Test"
+
+    # Checking eligibility must not silently create an attendance record.
+    history = client.get("/attendance/me", headers=student["headers"])
+    assert history.status_code == 200
+    assert history.json()["items"] == []
+
+    marked = client.post("/attendance/ble", headers=student["headers"], json=payload)
+    assert marked.status_code == 200, marked.text
+
+    after_marking = client.post(
+        "/attendance/ble/eligibility",
+        headers=student["headers"],
+        json=payload,
+    )
+    assert after_marking.status_code == 200, after_marking.text
+    assert after_marking.json()["eligible"] is False
+    assert after_marking.json()["already_marked"] is True
