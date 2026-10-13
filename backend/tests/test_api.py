@@ -544,3 +544,21 @@ def test_future_session_is_visible_to_owner_but_not_student(client: TestClient):
     student_sessions = client.get("/sessions/active", headers=student["headers"])
     assert student_sessions.status_code == 200
     assert session_id not in {item["id"] for item in student_sessions.json()}
+
+def test_production_login_rate_limit_returns_429(client: TestClient, monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("RENDER", raising=False)
+
+    for _ in range(10):
+        response = client.post(
+            "/auth/login",
+            json={"username": "rate_limit_user", "password": "wrong-password"},
+        )
+        assert response.status_code == 401
+
+    limited = client.post(
+        "/auth/login",
+        json={"username": "rate_limit_user", "password": "wrong-password"},
+    )
+    assert limited.status_code == 429
+    assert int(limited.headers["Retry-After"]) > 0
