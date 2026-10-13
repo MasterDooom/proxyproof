@@ -27,8 +27,8 @@ This is a prototype, not production-grade proof of physical presence. BLE RSSI i
 - Versioned Alembic migrations to adopt the prior prototype schema without dropping its rows, then add session and room ownership. Migration tests cover fresh SQLite databases and legacy data preservation.
 - Room creation/enrolment, device binding, session-specific BLE tag and rotating HMAC token APIs, automatic attendance validation, server-computed scheduled_start_at + 15 minutes cutoff, one-record-per-student/session integrity, manual correction, attendance history/percentage, roster and CSV export.
 - Android Kotlin/Jetpack Compose app with student and organiser flows, editable API base URL, encrypted bearer-token storage using Android Keystore, debug-only HTTP configuration, and hosted HTTPS release default.
-- Android foreground BLE advertiser/scanner components, shared 14-byte packet codec, 20-second server token rotation, repeated observations/dwell heuristic, ambiguity detection, permission handling, cancellation/cleanup, and clearly labelled manual fallback.
-- Backend and Android GitHub Actions workflows. Backend CI passed 25 tests on 2026-10-13 (run: https://github.com/MasterDooom/proxyproof/actions/runs/38381048129). An Android build/unit-test workflow passed on 2026-10-13 for the code before the most recent foreground lifecycle change; the latest lifecycle change must pass a fresh CI run before release.
+- Android foreground BLE advertiser/scanner components, shared 14-byte packet codec, 20-second server token rotation, repeated observations/dwell heuristic, ambiguity detection, role-specific permissions, cancellation/cleanup, scheduled broadcast arming, cutoff shutdown, server eligibility preflight, and clearly labelled manual fallback.
+- Backend and Android GitHub Actions workflows. Latest backend CI passed 31 tests (run: https://github.com/MasterDooom/proxyproof/actions/runs/38427063754). Latest Android unit-test/debug-APK build passed for the same source revision (run: https://github.com/MasterDooom/proxyproof/actions/runs/38427055486); artifact `proxyproof-debug-apk` is available from that run.
 - Render service and PostgreSQL instance exist in the connected Render account, but DATABASE_URL is not yet configured for the service. No production data-persistence claim is made.
 
 ### Not yet verified or implemented
@@ -36,7 +36,7 @@ This is a prototype, not production-grade proof of physical presence. BLE RSSI i
 - End-to-end BLE operation on two physical Android phones. CI can validate packet-codec logic, not radio behaviour or device/OEM compatibility.
 - Persistent hosted database connectivity, migration execution against Render PostgreSQL, and create/read/restart persistence smoke tests. These require securely setting DATABASE_URL in the Render service dashboard.
 - Background BLE attendance; the initial design is explicitly foreground-only and stops BLE when the app leaves the foreground.
-- Organiser-approved device replacement UI/endpoint, account recovery, rate limiting, and fully managed token revocation lifecycle.
+- Organiser-approved device replacement UI/endpoint and account recovery. Process-local per-IP login/registration and BLE request throttles are implemented; shared/distributed rate limiting and revocation of all sessions remain release work.
 - Production manufacturer identifier/protocol configuration. The current 0xFFFF manufacturer identifier is for development testing only and must be replaced before public distribution.
 - Strong physical-presence proof. RSSI and rotating tokens do not stop all live relays, spoofing or attendance outside a classroom; device binding is an app-installation UUID, not hardware-backed attestation.
 - Public-store release signing, durable production hosting/backup policy, and policy/privacy review.
