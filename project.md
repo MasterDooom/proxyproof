@@ -10,7 +10,7 @@ This is a prototype, not production-grade proof of physical presence. BLE RSSI i
 
 - Android-first: Kotlin + Jetpack Compose.
 - One Android app supports Student and Organiser roles to keep the four-day scope achievable.
-- Backend: FastAPI + SQLite for the prototype. Keep persistence behind SQLAlchemy so SQLite can later be replaced with PostgreSQL.
+- Backend: FastAPI + SQLAlchemy; SQLite for local development/tests and PostgreSQL for hosted deployments. Keep schemas and storage semantics consistent across both.
 - BLE: Android BLE advertiser on the organiser's phone; Android BLE scanner on student phones. Foreground operation first.
 - No separate React dashboard in the four-day MVP. The organiser dashboard is an app screen. A web dashboard is a post-deadline enhancement.
 - API polling for live attendance (about every 3–5 seconds while a session is open); avoid WebSockets until the core flow works.
@@ -46,7 +46,7 @@ This is a prototype, not production-grade proof of physical presence. BLE RSSI i
 ### Organiser
 1. Sign in using demo credentials or create an organiser account.
 2. Create/select a room (building + room code/name, e.g. AB1-301) and subject.
-3. Start a session for that room with a configurable duration (default 5 minutes).
+3. Create a session with an explicit scheduled class start time. The automatic attendance cutoff is always scheduled start plus 15 minutes; it is not a duration counted from the organiser tapping Start.
 4. App requests a fresh session token from the backend and advertises a compact payload over BLE.
 5. View detected/marked students, manually add/remove attendance, and close the session.
 6. View session history and export attendance as CSV.
@@ -56,7 +56,7 @@ This is a prototype, not production-grade proof of physical presence. BLE RSSI i
 2. Join/select rooms they are enrolled in. In a real deployment, room enrolments should be assigned/approved by an organiser; the prototype may expose a controlled demo enrolment flow.
 3. Keep the app's foreground attendance screen open during the demo.
 4. Scan for active ProxyProof advertisements.
-5. For an eligible room, collect repeated observations over a short dwell window; submit the session ID and latest rotating token with the authenticated student's identity.
+5. For a stable candidate, collect repeated observations over the dwell window; submit the six-byte session tag, latest rotating token and observed RSSI under the student's authenticated account. The server resolves the tag to the session.
 6. Display a clear state: scanning, candidate detected, validating, present, ambiguous room, or session closed.
 7. View attendance history and percentage.
 
@@ -109,13 +109,13 @@ Limitations:
                ▼
     FastAPI backend
       ├── Authentication + device binding
-      ├── Rooms + enrolments
+      ├── Room/session owner checks + enrolments
       ├── Attendance sessions + rotating tokens
-      ├── Attendance validation
+      ├── Attendance validation + cutoff enforcement
       └── History + CSV export
                │
                ▼
-    SQLAlchemy models + SQLite database
+    SQLAlchemy models + local SQLite / hosted PostgreSQL
 
 Keep BLE platform code separate from Compose screens. Suggested Android packages:
 - ui/auth
@@ -149,13 +149,13 @@ Suggested backend modules:
 - `User`: ID, username, display name, PBKDF2 password hash, role and active flag.
 - `ApiToken`: SHA-256 hash of an opaque bearer token, user ID, expiry and creation time. Raw access tokens are returned once and not persisted.
 - `Device`: user ID, app-generated installation UUID, active flag and registration time. The current prototype permits one installation per student but does not provide device replacement approval yet.
-- `Room`: stable room ID, building, room code and display name.
+- `Room`: stable room ID, building, room code, display name and nullable organiser owner (nullable for migrated legacy rows).
 - `RoomEnrollment`: user ID, room ID and enrollment time. For the prototype, students can self-enroll in rooms; real deployment should require organiser approval or roster provisioning.
-- `AttendanceSession`: UUID, room ID, subject, scheduled start, calculated deadline, status and creation time.
+- `AttendanceSession`: UUID, room ID, organiser owner, subject, scheduled start, calculated deadline, status and creation time.
 - `SessionBleTag`: random 6-byte public session tag (12 hex characters).
 - `AttendanceRecord`: session ID, student ID, device ID, marked time, method (`ble` or `manual`), reported RSSI and status. Unique constraint on `(session_id, student_id)`.
 
-The BLE token is computed as a truncated HMAC of the session ID and the current 20-second time slot; it is not stored in the database. The server accepts the current or previous slot to tolerate a rotation boundary, but never accepts new automatic attendance after the session's 15-minute deadline.
+The BLE token is computed as a truncated HMAC of the session ID and the current 20-second time slot; it is not stored in the database. The server accepts the current or previous slot to tolerate a rotation boundary, but never accepts new automatic attendance after the session's 15-minute deadline. The Android packet codec places the six raw bytes of session tag followed by eight raw bytes of token in manufacturer data; the current `0xFFFF` identifier is development-only.
 
 Store timestamps as UTC. SQLite stores naive UTC datetimes in this prototype; API responses convert them to timezone-aware UTC values.
 
